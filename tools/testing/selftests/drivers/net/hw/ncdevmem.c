@@ -48,6 +48,7 @@
 #define __iovec_defined
 #include <fcntl.h>
 #include <malloc.h>
+#include <pthread.h>
 #include <error.h>
 #include <poll.h>
 
@@ -93,6 +94,10 @@ static unsigned int ifindex;
 static unsigned int dmabuf_id;
 static uint32_t tx_dmabuf_id;
 static int waittime_ms = 500;
+static unsigned int max_chunk = 0;
+static bool loopback;
+static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct memory_buffer {
 	int fd;
@@ -456,6 +461,8 @@ static int bind_tx_queue(unsigned int ifindex, unsigned int dmabuf_fd,
 
 	fprintf(stderr, "got tx dmabuf id=%d\n", rsp->id);
 	tx_dmabuf_id = rsp->id;
+	if (loopback)
+		dmabuf_id = tx_dmabuf_id;
 
 	netdev_bind_tx_req_free(req);
 	netdev_bind_tx_rsp_free(rsp);
@@ -515,11 +522,11 @@ static int do_server(struct memory_buffer *mem)
 	struct sockaddr_in6 client_addr;
 	struct sockaddr_in6 server_sin;
 	size_t page_aligned_frags = 0;
+	struct ynl_sock *ys = NULL;
 	size_t total_received = 0;
 	socklen_t client_addr_len;
 	bool is_devmem = false;
 	char *tmp_mem = NULL;
-	struct ynl_sock *ys;
 	char iobuf[819200];
 	char buffer[256];
 	int socket_fd;
@@ -531,33 +538,33 @@ static int do_server(struct memory_buffer *mem)
 	if (ret < 0)
 		error(1, 0, "parse server address");
 
-	if (reset_flow_steering())
-		error(1, 0, "Failed to reset flow steering\n");
+	if (!loopback) {
+		if (reset_flow_steering())
+			error(1, 0, "Failed to reset flow steering\n");
 
-	if (configure_headersplit(1))
-		error(1, 0, "Failed to enable TCP header split\n");
+		if (configure_headersplit(1))
+			error(1, 0, "Failed to enable TCP header split\n");
 
-	/* Configure RSS to divert all traffic from our devmem queues */
-	if (configure_rss())
-		error(1, 0, "Failed to configure rss\n");
+		if (configure_rss())
+			error(1, 0, "Failed to configure rss\n");
 
-	/* Flow steer our devmem flows to start_queue */
-	if (configure_flow_steering(&server_sin))
-		error(1, 0, "Failed to configure flow steering\n");
+		if (configure_flow_steering(&server_sin))
+			error(1, 0, "Failed to configure flow steering\n");
 
-	sleep(1);
+		sleep(1);
 
-	queues = malloc(sizeof(*queues) * num_queues);
+		queues = malloc(sizeof(*queues) * num_queues);
 
-	for (i = 0; i < num_queues; i++) {
-		queues[i]._present.type = 1;
-		queues[i]._present.id = 1;
-		queues[i].type = NETDEV_QUEUE_TYPE_RX;
-		queues[i].id = start_queue + i;
+		for (i = 0; i < num_queues; i++) {
+			queues[i]._present.type = 1;
+			queues[i]._present.id = 1;
+			queues[i].type = NETDEV_QUEUE_TYPE_RX;
+			queues[i].id = start_queue + i;
+		}
+
+		if (bind_rx_queue(ifindex, mem->fd, queues, num_queues, &ys))
+			error(1, 0, "Failed to bind\n");
 	}
-
-	if (bind_rx_queue(ifindex, mem->fd, queues, num_queues, &ys))
-		error(1, 0, "Failed to bind\n");
 
 	tmp_mem = malloc(mem->size);
 	if (!tmp_mem)
@@ -581,6 +588,12 @@ static int do_server(struct memory_buffer *mem)
 		error(1, errno, "%s: [FAIL, listen]\n", TEST_PREFIX);
 
 	client_addr_len = sizeof(client_addr);
+
+	if (loopback) {
+		pthread_mutex_lock(&mutex);
+		pthread_cond_signal(&cond);
+		pthread_mutex_unlock(&mutex);
+	}
 
 	inet_ntop(AF_INET6, &server_sin.sin6_addr, buffer,
 		  sizeof(buffer));
@@ -618,7 +631,7 @@ static int do_server(struct memory_buffer *mem)
 		}
 		if (ret == 0) {
 			fprintf(stderr, "client exited\n");
-			goto cleanup;
+			break;
 		}
 
 		i++;
@@ -694,12 +707,11 @@ static int do_server(struct memory_buffer *mem)
 	fprintf(stderr, "page_aligned_frags=%lu, non_page_aligned_frags=%lu\n",
 		page_aligned_frags, non_page_aligned_frags);
 
-cleanup:
-
 	free(tmp_mem);
 	close(client_fd);
 	close(socket_fd);
-	ynl_sock_destroy(ys);
+	if (ys)
+		ynl_sock_destroy(ys);
 
 	return 0;
 }
@@ -876,7 +888,7 @@ static int do_client(struct memory_buffer *mem)
 	if (bind_tx_queue(ifindex, mem->fd, &ys))
 		error(1, 0, "Failed to bind\n");
 
-	if (client_ip) {
+	if (!loopback && client_ip) {
 		ret = parse_address(client_ip, atoi(port), &client_sin);
 		if (ret < 0)
 			error(1, 0, "parse client address");
@@ -962,16 +974,28 @@ static int do_client(struct memory_buffer *mem)
 	return 0;
 }
 
+static void *server_thread(void *data)
+{
+	struct memory_buffer *mem = data;
+
+	do_server(mem);
+
+	return (void *)NULL;
+}
+
 int main(int argc, char *argv[])
 {
 	struct memory_buffer *mem;
 	int is_server = 0, opt;
 	int ret;
 
-	while ((opt = getopt(argc, argv, "ls:c:p:v:q:t:f:")) != -1) {
+	while ((opt = getopt(argc, argv, "Lls:c:p:v:q:t:f:")) != -1) {
 		switch (opt) {
 		case 'l':
 			is_server = 1;
+			break;
+		case 'L':
+			loopback = true;
 			break;
 		case 's':
 			server_ip = optarg;
@@ -1029,7 +1053,7 @@ int main(int argc, char *argv[])
 
 	if (start_queue < 0 && num_queues < 0) {
 		num_queues = rxq_num(ifindex);
-		if (num_queues < 2)
+		if (num_queues < 2 && !loopback)
 			error(1, 0, "number of device queues is too low\n");
 
 		num_queues = 1;
@@ -1057,7 +1081,24 @@ int main(int argc, char *argv[])
 		error(1, 0, "Missing -p argument\n");
 
 	mem = provider->alloc(getpagesize() * NUM_PAGES);
-	ret = is_server ? do_server(mem) : do_client(mem);
+	if (loopback) {
+		pthread_t thread;
+		int rc;
+
+		rc = pthread_create(&thread, NULL, server_thread, mem);
+		if (rc != 0)
+			error(-1, -errno, "pthread_create failed");
+
+		pthread_mutex_lock(&mutex);
+		pthread_cond_wait(&cond, &mutex);
+		pthread_mutex_unlock(&mutex);
+
+		ret = do_client(mem);
+
+		pthread_join(thread, NULL);
+	} else {
+		ret = is_server ? do_server(mem) : do_client(mem);
+	}
 	provider->free(mem);
 
 	return ret;
