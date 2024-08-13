@@ -547,6 +547,7 @@ struct sock {
 	struct rcu_head		sk_rcu;
 	netns_tracker		ns_tracker;
 	struct xarray		sk_user_frags;
+	struct xarray		sk_tx_binding;
 };
 
 struct sock_bh_locked {
@@ -1816,6 +1817,7 @@ struct sockcm_cookie {
 	u32 tsflags;
 	u32 ts_opt_id;
 	u32 priority;
+	u32 devmem_id;
 };
 
 static inline void sockcm_init(struct sockcm_cookie *sockc,

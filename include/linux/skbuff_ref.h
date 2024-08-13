@@ -8,6 +8,7 @@
 #define _LINUX_SKBUFF_REF_H
 
 #include <linux/skbuff.h>
+#include <net/netmem.h>
 
 /**
  * __skb_frag_ref - take an addition reference on a paged fragment.
@@ -17,6 +18,11 @@
  */
 static inline void __skb_frag_ref(skb_frag_t *frag)
 {
+	/* For TX, the socket holds dmabuf binding and the skb holds
+	 * the socket until completion.
+	 */
+	if (unlikely(netmem_is_net_iov(frag->netmem)))
+		return;
 	get_page(skb_frag_page(frag));
 }
 
@@ -40,6 +46,9 @@ static inline void skb_page_unref(netmem_ref netmem, bool recycle)
 	if (recycle && napi_pp_put_page(netmem))
 		return;
 #endif
+	/* See __skb_frag_ref for rationale. */
+	if (unlikely(netmem_is_net_iov(netmem)))
+		return;
 	put_page(netmem_to_page(netmem));
 }
 
