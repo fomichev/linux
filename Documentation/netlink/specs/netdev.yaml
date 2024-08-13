@@ -518,6 +518,10 @@ attribute-sets:
         type: u32
         checks:
           min: 1
+      -
+        name: socket-fd
+        doc: socket file descriptor to bind to for tx.
+        type: u32
 
 operations:
   list:
@@ -711,6 +715,20 @@ operations:
             - defer-hard-irqs
             - gro-flush-timeout
             - irq-suspend-timeout
+    -
+      name: bind-tx
+      doc: Bind dmabuf to netdev for TX
+      attribute-set: dmabuf
+      flags: [ admin-perm ]
+      do:
+        request:
+          attributes:
+            - ifindex
+            - fd
+            - socket-fd
+        reply:
+          attributes:
+            - id
 
 kernel-family:
   headers: [ "linux/list.h"]

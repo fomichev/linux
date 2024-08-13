@@ -910,6 +910,85 @@ err_genlmsg_free:
 	return err;
 }
 
+int netdev_nl_bind_tx_doit(struct sk_buff *skb, struct genl_info *info)
+{
+	struct net_devmem_dmabuf_binding *binding;
+	u32 ifindex, dmabuf_fd, socket_fd;
+	struct net_device *netdev;
+	struct sk_buff *rsp;
+	struct socket *sock;
+	struct sock *sk;
+	int err = 0;
+	void *hdr;
+
+	if (GENL_REQ_ATTR_CHECK(info, NETDEV_A_DEV_IFINDEX) ||
+	    GENL_REQ_ATTR_CHECK(info, NETDEV_A_DMABUF_SOCKET_FD) ||
+	    GENL_REQ_ATTR_CHECK(info, NETDEV_A_DMABUF_FD))
+		return -EINVAL;
+
+	ifindex = nla_get_u32(info->attrs[NETDEV_A_DEV_IFINDEX]);
+	socket_fd = nla_get_u32(info->attrs[NETDEV_A_DMABUF_SOCKET_FD]);
+	dmabuf_fd = nla_get_u32(info->attrs[NETDEV_A_DMABUF_FD]);
+
+	CLASS(fd, f)(socket_fd);
+
+	if (fd_empty(f))
+		return -EBADF;
+
+	sock = sock_from_file(fd_file(f));
+	if (unlikely(!sock))
+		return -ENOTSOCK;
+
+	sk = sock->sk;
+	if (!sk_is_tcp(sk) || sk->sk_state != TCP_CLOSE)
+		return -EINVAL;
+
+	/* TODO: sock_hold to make sure we are not racing with __sk_free? */
+
+	rsp = genlmsg_new(GENLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!rsp)
+		return -ENOMEM;
+
+	hdr = genlmsg_iput(rsp, info);
+	if (!hdr) {
+		err = -EMSGSIZE;
+		goto err_genlmsg_free;
+	}
+
+	rtnl_lock();
+
+	netdev = __dev_get_by_index(genl_info_net(info), ifindex);
+	if (!netdev || !netif_device_present(netdev)) {
+		err = -ENODEV;
+		goto err_unlock;
+	}
+
+	binding = net_devmem_bind_tx_dmabuf(netdev, sk, dmabuf_fd, info->extack);
+	if (IS_ERR(binding)) {
+		err = PTR_ERR(binding);
+		goto err_unlock;
+	}
+
+	nla_put_u32(rsp, NETDEV_A_DMABUF_ID, binding->id);
+	genlmsg_end(rsp, hdr);
+
+	err = genlmsg_reply(rsp, info);
+	if (err)
+		goto err_unbind;
+
+	rtnl_unlock();
+
+	return 0;
+
+err_unbind:
+	net_devmem_unbind_dmabuf(binding);
+err_unlock:
+	rtnl_unlock();
+err_genlmsg_free:
+	nlmsg_free(rsp);
+	return err;
+}
+
 void netdev_nl_sock_priv_init(struct list_head *priv)
 {
 	INIT_LIST_HEAD(priv);

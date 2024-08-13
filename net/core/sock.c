@@ -135,6 +135,7 @@
 #include <net/cls_cgroup.h>
 #include <net/netprio_cgroup.h>
 #include <linux/sock_diag.h>
+#include <linux/workqueue.h>
 
 #include <linux/filter.h>
 #include <net/sock_reuseport.h>
@@ -149,6 +150,7 @@
 #include <linux/ethtool.h>
 
 #include "dev.h"
+#include "devmem.h"
 
 static DEFINE_MUTEX(proto_list_mutex);
 static LIST_HEAD(proto_list);
@@ -2242,6 +2244,7 @@ struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
 		sock_update_classid(&sk->sk_cgrp_data);
 		sock_update_netprioidx(&sk->sk_cgrp_data);
 		sk_tx_queue_clear(sk);
+		xa_init_flags(&sk->sk_tx_binding, XA_FLAGS_ALLOC1);
 	}
 
 	return sk;
@@ -2258,6 +2261,8 @@ static void __sk_destruct(struct rcu_head *head)
 
 	if (sk->sk_destruct)
 		sk->sk_destruct(sk);
+
+	net_devmem_bind_tx_release(sk);
 
 	filter = rcu_dereference_check(sk->sk_filter,
 				       refcount_read(&sk->sk_wmem_alloc) == 0);
@@ -2941,6 +2946,11 @@ int __sock_cmsg_send(struct sock *sk, struct cmsghdr *cmsg,
 	/* SCM_RIGHTS and SCM_CREDENTIALS are semantically in SOL_UNIX. */
 	case SCM_RIGHTS:
 	case SCM_CREDENTIALS:
+		break;
+	case SCM_DEVMEM_DMABUF:
+		if (cmsg->cmsg_len != CMSG_LEN(sizeof(u32)))
+			return -EINVAL;
+		sockc->devmem_id = *(u32 *)CMSG_DATA(cmsg);
 		break;
 	default:
 		return -EINVAL;

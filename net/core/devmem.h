@@ -13,6 +13,7 @@
 #include <linux/dma-direction.h>
 
 struct netlink_ext_ack;
+#include <linux/dma-direction.h>
 
 struct net_devmem_dmabuf_binding {
 	enum dma_data_direction direction;
@@ -45,6 +46,11 @@ struct net_devmem_dmabuf_binding {
 	 * active.
 	 */
 	u32 id;
+
+	/* TX side. */
+	struct net_iov **tx_vec;
+	size_t tx_vec_len;
+	struct work_struct work;
 };
 
 #if defined(CONFIG_NET_DEVMEM)
@@ -71,10 +77,15 @@ void __net_devmem_dmabuf_binding_free(struct net_devmem_dmabuf_binding *binding)
 struct net_devmem_dmabuf_binding *
 net_devmem_bind_dmabuf(struct net_device *dev, unsigned int dmabuf_fd,
 		       struct netlink_ext_ack *extack);
+struct net_devmem_dmabuf_binding *
+net_devmem_bind_tx_dmabuf(struct net_device *dev, struct sock *sk,
+			  unsigned int dmabuf_fd,
+			  struct netlink_ext_ack *extack);
 void net_devmem_unbind_dmabuf(struct net_devmem_dmabuf_binding *binding);
 int net_devmem_bind_dmabuf_to_queue(struct net_device *dev, u32 rxq_idx,
 				    struct net_devmem_dmabuf_binding *binding,
 				    struct netlink_ext_ack *extack);
+void net_devmem_bind_tx_release(struct sock *sk);
 void dev_dmabuf_uninstall(struct net_device *dev);
 
 static inline struct dmabuf_genpool_chunk_owner *
@@ -141,6 +152,14 @@ net_devmem_bind_dmabuf(struct net_device *dev, unsigned int dmabuf_fd,
 	return ERR_PTR(-EOPNOTSUPP);
 }
 
+static inline struct net_devmem_dmabuf_binding *
+net_devmem_bind_tx_dmabuf(struct net_device *dev, struct sock *sk,
+			  unsigned int dmabuf_fd,
+			  struct netlink_ext_ack *extack)
+{
+	return ERR_PTR(-EOPNOTSUPP);
+}
+
 static inline void
 net_devmem_unbind_dmabuf(struct net_devmem_dmabuf_binding *binding)
 {
@@ -153,6 +172,10 @@ net_devmem_bind_dmabuf_to_queue(struct net_device *dev, u32 rxq_idx,
 
 {
 	return -EOPNOTSUPP;
+}
+
+static inline void net_devmem_bind_tx_release(struct sock *sk)
+{
 }
 
 static inline void dev_dmabuf_uninstall(struct net_device *dev)
@@ -179,5 +202,21 @@ static inline u32 net_iov_binding_id(const struct net_iov *niov)
 	return 0;
 }
 #endif
+
+static inline
+struct net_iov *net_devmem_get_niov_at(struct net_devmem_dmabuf_binding *binding,
+				       size_t addr, size_t *off, size_t *size)
+{
+	size_t idx;
+
+	idx = addr / PAGE_SIZE;
+	if (idx >= binding->tx_vec_len)
+		return NULL;
+
+	*off = addr % PAGE_SIZE;
+	*size = PAGE_SIZE - *off;
+
+	return binding->tx_vec[idx];
+}
 
 #endif /* _NET_DEVMEM_H */

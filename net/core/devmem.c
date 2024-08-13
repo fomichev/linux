@@ -15,6 +15,7 @@
 #include <net/netdev_queues.h>
 #include <net/netdev_rx_queue.h>
 #include <net/page_pool/helpers.h>
+#include <net/sock.h>
 #include <trace/events/page_pool.h>
 
 #include "devmem.h"
@@ -23,6 +24,7 @@
 
 /* Device memory support */
 
+static struct workqueue_struct *tx_unbind_wq;
 /* Protected by rtnl_lock() */
 static DEFINE_XARRAY_FLAGS(net_devmem_dmabuf_bindings, XA_FLAGS_ALLOC1);
 
@@ -63,6 +65,7 @@ void __net_devmem_dmabuf_binding_free(struct net_devmem_dmabuf_binding *binding)
 	dma_buf_detach(binding->dmabuf, binding->attachment);
 	dma_buf_put(binding->dmabuf);
 	xa_destroy(&binding->bound_rxqs);
+	kfree(binding->tx_vec);
 	kfree(binding);
 }
 
@@ -122,7 +125,8 @@ void net_devmem_unbind_dmabuf(struct net_devmem_dmabuf_binding *binding)
 		WARN_ON(netdev_rx_queue_restart(binding->dev, rxq_idx));
 	}
 
-	xa_erase(&net_devmem_dmabuf_bindings, binding->id);
+	if (binding->direction == DMA_FROM_DEVICE)
+		xa_erase(&net_devmem_dmabuf_bindings, binding->id);
 
 	net_devmem_dmabuf_binding_put(binding);
 }
@@ -315,7 +319,8 @@ err_free_chunks:
 }
 
 struct net_devmem_dmabuf_binding *
-net_devmem_bind_dmabuf(struct net_device *dev, unsigned int dmabuf_fd,
+net_devmem_bind_dmabuf(struct net_device *dev,
+		       unsigned int dmabuf_fd,
 		       struct netlink_ext_ack *extack)
 {
 	struct net_devmem_dmabuf_binding *binding;
@@ -344,6 +349,94 @@ err_free_id:
 err_free_binding:
 	__net_devmem_dmabuf_binding_free(binding);
 	return ERR_PTR(err);
+}
+
+static void net_devmem_dmabuf_assign_tx_chunk(struct gen_pool *genpool,
+					      struct gen_pool_chunk *chunk,
+					      void *not_used)
+{
+	struct dmabuf_genpool_chunk_owner *owner = chunk->owner;
+	struct net_devmem_dmabuf_binding *binding;
+	struct net_iov *niov;
+	int idx, i;
+
+	binding = owner->binding;
+	for (i = 0; i < owner->num_niovs; i++) {
+		niov = &owner->niovs[i];
+		idx = net_iov_idx(niov);
+		binding->tx_vec[owner->base_virtual / PAGE_SIZE + idx] = niov;
+	}
+}
+
+struct net_devmem_dmabuf_binding *
+net_devmem_bind_tx_dmabuf(struct net_device *dev,
+			  struct sock *sk,
+			  unsigned int dmabuf_fd,
+			  struct netlink_ext_ack *extack)
+{
+	struct net_devmem_dmabuf_binding *binding;
+	struct scatterlist *sg;
+	unsigned long virtual;
+	unsigned int sg_idx;
+	int err;
+
+	binding = net_devmem_binding_alloc(dev, DMA_TO_DEVICE, dmabuf_fd,
+					   extack);
+	if (IS_ERR(binding))
+		return binding;
+
+	err = xa_alloc_bh(&sk->sk_tx_binding, &binding->id, binding,
+			  xa_limit_31b, GFP_KERNEL);
+	if (err)
+		goto err_free_binding;
+
+	err = net_devmem_binding_populate(dev, binding);
+	if (err < 0)
+		goto err_free_id;
+
+	virtual = 0;
+	for_each_sgtable_dma_sg(binding->sgt, sg, sg_idx)
+		virtual += sg_dma_len(sg);
+
+	binding->tx_vec_len = virtual / PAGE_SIZE;
+	binding->tx_vec =
+		kcalloc(binding->tx_vec_len, sizeof(struct net_iov *), GFP_KERNEL);
+	if (!binding->tx_vec) {
+		err = -ENOMEM;
+		goto err_free_id;
+	}
+
+	gen_pool_for_each_chunk(binding->chunk_pool,
+				net_devmem_dmabuf_assign_tx_chunk, NULL);
+
+	return binding;
+
+err_free_id:
+	xa_erase(&sk->sk_tx_binding, binding->id);
+err_free_binding:
+	__net_devmem_dmabuf_binding_free(binding);
+	return ERR_PTR(err);
+}
+
+static void tx_binding_destroy_work(struct work_struct *work)
+{
+	struct net_devmem_dmabuf_binding *binding =
+		container_of(work, struct net_devmem_dmabuf_binding, work);
+
+	net_devmem_dmabuf_binding_put(binding);
+}
+
+void net_devmem_bind_tx_release(struct sock *sk)
+{
+	struct net_devmem_dmabuf_binding *binding;
+	unsigned long id;
+
+	xa_for_each(&sk->sk_tx_binding, id, binding) {
+		INIT_WORK(&binding->work, tx_binding_destroy_work);
+		queue_work(tx_unbind_wq, &binding->work);
+	}
+
+	xa_destroy(&sk->sk_tx_binding);
 }
 
 void dev_dmabuf_uninstall(struct net_device *dev)
@@ -431,3 +524,13 @@ bool mp_dmabuf_devmem_release_page(struct page_pool *pool, netmem_ref netmem)
 	/* We don't want the page pool put_page()ing our net_iovs. */
 	return false;
 }
+
+static int __init net_devmem_init(void)
+{
+	tx_unbind_wq = alloc_workqueue("tx_unbind_wq", 0, 0);
+	BUG_ON(!tx_unbind_wq);
+
+	return 0;
+}
+
+core_initcall(net_devmem_init);
