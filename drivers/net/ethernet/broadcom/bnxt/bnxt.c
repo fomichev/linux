@@ -710,7 +710,10 @@ normal_tx:
 			goto tx_dma_error;
 
 		tx_buf = &txr->tx_buf_ring[RING_TX(bp, prod)];
-		dma_unmap_addr_set(tx_buf, mapping, mapping);
+		if (netmem_is_net_iov(frag->netmem))
+			dma_unmap_addr_set(tx_buf, mapping, 0);
+		else
+			dma_unmap_addr_set(tx_buf, mapping, mapping);
 
 		txbd->tx_bd_haddr = cpu_to_le64(mapping);
 
@@ -767,9 +770,10 @@ tx_dma_error:
 	for (i = 0; i < last_frag; i++) {
 		prod = NEXT_TX(prod);
 		tx_buf = &txr->tx_buf_ring[RING_TX(bp, prod)];
-		dma_unmap_page(&pdev->dev, dma_unmap_addr(tx_buf, mapping),
-			       skb_frag_size(&skb_shinfo(skb)->frags[i]),
-			       DMA_TO_DEVICE);
+		if (dma_unmap_addr(tx_buf, mapping))
+			dma_unmap_page(&pdev->dev, dma_unmap_addr(tx_buf, mapping),
+				       skb_frag_size(&skb_shinfo(skb)->frags[i]),
+				       DMA_TO_DEVICE);
 	}
 
 tx_free:
@@ -839,11 +843,12 @@ static bool __bnxt_tx_int(struct bnxt *bp, struct bnxt_tx_ring_info *txr,
 		for (j = 0; j < last; j++) {
 			cons = NEXT_TX(cons);
 			tx_buf = &txr->tx_buf_ring[RING_TX(bp, cons)];
-			dma_unmap_page(
-				&pdev->dev,
-				dma_unmap_addr(tx_buf, mapping),
-				skb_frag_size(&skb_shinfo(skb)->frags[j]),
-				DMA_TO_DEVICE);
+			if (dma_unmap_addr(tx_buf, mapping))
+				dma_unmap_page(
+					&pdev->dev,
+					dma_unmap_addr(tx_buf, mapping),
+					skb_frag_size(&skb_shinfo(skb)->frags[j]),
+					DMA_TO_DEVICE);
 		}
 		if (unlikely(is_ts_pkt)) {
 			if (BNXT_CHIP_P5(bp)) {
@@ -3379,9 +3384,10 @@ static void bnxt_free_one_tx_ring_skbs(struct bnxt *bp,
 			skb_frag_t *frag = &skb_shinfo(skb)->frags[j];
 
 			tx_buf = &txr->tx_buf_ring[ring_idx];
-			dma_unmap_page(&pdev->dev,
-				       dma_unmap_addr(tx_buf, mapping),
-				       skb_frag_size(frag), DMA_TO_DEVICE);
+			if (dma_unmap_addr(tx_buf, mapping))
+				dma_unmap_page(&pdev->dev,
+					       dma_unmap_addr(tx_buf, mapping),
+					       skb_frag_size(frag), DMA_TO_DEVICE);
 		}
 		dev_kfree_skb(skb);
 	}
@@ -16634,8 +16640,7 @@ static int bnxt_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	if (BNXT_SUPPORTS_NTUPLE_VNIC(bp))
 		bp->rss_cap |= BNXT_RSS_CAP_MULTI_RSS_CTX;
-	if (BNXT_SUPPORTS_QUEUE_API(bp))
-		dev->queue_mgmt_ops = &bnxt_queue_mgmt_ops;
+	dev->queue_mgmt_ops = &bnxt_queue_mgmt_ops;
 	dev->request_ops_lock = true;
 
 	rc = register_netdev(dev);
