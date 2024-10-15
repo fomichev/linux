@@ -330,6 +330,10 @@ static int configure_headersplit(bool on)
 	ethtool_rings_set_req_set_header_dev_index(req, ifindex);
 	/* 0 - off, 1 - auto, 2 - on */
 	ethtool_rings_set_req_set_tcp_data_split(req, on ? 2 : 0);
+#if 0
+	if (on)
+		ethtool_rings_set_req_set_tcp_data_split_thresh(req, 0);
+#endif
 	ret = ethtool_rings_set(ys, req);
 	if (ret < 0)
 		fprintf(stderr, "YNL failed: %s\n", ys->err.msg);
