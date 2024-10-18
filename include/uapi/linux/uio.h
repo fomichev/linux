@@ -38,6 +38,24 @@ struct dmabuf_token {
 	__u32 token_count;
 };
 
+#define LINR_SZ (16*1024*1024-16)
+
+#define CMSG_SZ (LINR_SZ/sizeof(struct dmabuf_cmsg))
+#define TOKN_SZ (LINR_SZ/sizeof(struct dmabuf_token))
+
+struct devmem_ring {
+	__u32 producer ____cacheline_aligned_in_smp;
+	__u32 producer_err ____cacheline_aligned_in_smp;
+	__u32 consumer ____cacheline_aligned_in_smp;
+	__u32 consumer_err ____cacheline_aligned_in_smp;
+
+	union {
+		struct dmabuf_cmsg cmsg[CMSG_SZ];
+		struct dmabuf_token token[TOKN_SZ];
+		char data[LINR_SZ];
+	};
+};
+
 /*
  *	UIO_MAXIOV shall be at least 16 1003.1g (5.4.1.1)
  */

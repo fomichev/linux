@@ -234,6 +234,28 @@ struct sock_common {
 struct bpf_local_storage;
 struct sk_filter;
 
+struct mrq_ring {
+	struct devmem_ring *ring; /* TODO: rename to mrq_uring */
+
+	u32 cached_producer;
+	u32 flushed_producer;
+	u32 cached_consumer;
+	u32 flushed_consumer;
+	int fin;
+};
+
+struct mrq_rings {
+	bool active;
+	bool skip_xa;
+	bool skip_copy;
+	bool skip_wakeup;
+	int size;
+
+	struct mrq_ring cmsg;
+	struct mrq_ring token;
+	struct mrq_ring linear;
+};
+
 /**
   *	struct sock - network layer representation of sockets
   *	@__sk_common: shared layout with inet_timewait_sock
@@ -548,6 +570,7 @@ struct sock {
 	netns_tracker		ns_tracker;
 	struct xarray		sk_user_frags;
 	struct xarray		sk_tx_binding;
+	struct mrq_rings	sk_mrq;
 };
 
 struct sock_bh_locked {
