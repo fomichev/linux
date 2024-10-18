@@ -29,6 +29,10 @@
 #define _GNU_SOURCE
 #define __EXPORTED_HEADERS__
 
+#ifndef ____cacheline_aligned_in_smp
+#define ____cacheline_aligned_in_smp __attribute__((aligned(64)))
+#endif
+
 #include <linux/uio.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,6 +90,60 @@ static unsigned int max_chunk = 0;
 static bool loopback;
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool mrq = false;
+static bool mrq_skip_xa = true;
+
+#define SOL_TCP         6
+#define TCP_MRQ_ALLOC		44
+#define TCP_MRQ_ACTIVATE	45
+
+struct tcp_mrq_alloc {
+	__u64 size;
+};
+
+struct tcp_mrq_activate {
+	__u64 skip_xa:1;
+	__u64 skip_copy:1;
+	__u64 skip_wakeup:1;
+	__u64 pad:61;
+};
+
+static void enable_mrq(int fd, struct devmem_ring **cmsg, struct devmem_ring **token, struct devmem_ring **linear)
+{
+	struct tcp_mrq_alloc alloc = {
+		/* TODO: support PAGE_SIZE */
+		.size = (sizeof(struct devmem_ring) / 4096 + 1) * 4096,
+	};
+
+	struct tcp_mrq_activate act = {
+		.skip_xa = mrq_skip_xa,
+		.skip_copy = 1,
+		.skip_wakeup = 1,
+	};
+
+	int ret;
+
+	ret = setsockopt(fd, SOL_TCP, TCP_MRQ_ALLOC, &alloc, sizeof(alloc));
+	if (ret)
+		error(1, errno, "TCP_MRQ_ALLOC\n");
+
+	ret = setsockopt(fd, SOL_TCP, TCP_MRQ_ACTIVATE, &act, sizeof(act));
+	if (ret)
+		error(1, errno, "TCP_MRQ_ACTIVATE\n");
+
+	*cmsg = mmap(NULL, sizeof(struct devmem_ring), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, 1 * 4096);
+	if (*cmsg == MAP_FAILED)
+		error(1, errno, "mmap(cmsg)\n");
+
+	*token = mmap(NULL, sizeof(struct devmem_ring), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, 2 * 4096);
+	if (*token == MAP_FAILED)
+		error(1, errno, "mmap(token)\n");
+
+	*linear = mmap(NULL, sizeof(struct devmem_ring), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, 3 * 4096);
+	if (*linear == MAP_FAILED)
+		error(1, errno, "mmap(linear)\n");
+
+}
 
 struct memory_buffer {
 	int fd;
@@ -505,20 +563,238 @@ static int parse_address(const char *str, int port, struct sockaddr_in6 *sin6)
 	return 0;
 }
 
-static int do_server(struct memory_buffer *mem)
+static bool handle_token(struct memory_buffer *mem, struct dmabuf_cmsg *dmabuf_cmsg, char *tmp_mem, size_t *total_received, size_t *page_aligned_frags, size_t *non_page_aligned_frags)
+{
+	total_received += dmabuf_cmsg->frag_size;
+
+	fprintf(stderr,
+		"received frag_page=%llu, in_page_offset=%llu, frag_offset=%llu, frag_size=%u, token=%u, total_received=%lu, dmabuf_id=%u\n",
+		dmabuf_cmsg->frag_offset >> PAGE_SHIFT,
+		dmabuf_cmsg->frag_offset % getpagesize(),
+		dmabuf_cmsg->frag_offset,
+		dmabuf_cmsg->frag_size, dmabuf_cmsg->frag_token,
+		*total_received, dmabuf_cmsg->dmabuf_id);
+
+	if (!dmabuf_cmsg->dmabuf_id) {
+		fprintf(stderr, "got FIN\n");
+		return true;
+	}
+
+	if (dmabuf_cmsg->dmabuf_id != dmabuf_id)
+		error(1, 0,
+		      "received on wrong dmabuf_id: flow steering error\n");
+
+	provider->memcpy_from_device(tmp_mem, mem,
+				     dmabuf_cmsg->frag_offset,
+				     dmabuf_cmsg->frag_size);
+
+	if (dmabuf_cmsg->frag_size % getpagesize())
+		(*non_page_aligned_frags)++;
+	else
+		(*page_aligned_frags)++;
+
+
+	if (do_validation)
+		validate_buffer(tmp_mem,
+				dmabuf_cmsg->frag_size);
+	else
+		print_nonzero_bytes(tmp_mem,
+				    dmabuf_cmsg->frag_size);
+
+	return false;
+}
+
+static void mrq_linear(struct devmem_ring *linear)
+{
+	int producer, consumer;
+
+	consumer = __atomic_load_n(&linear->consumer, __ATOMIC_RELAXED);
+	producer = __atomic_load_n(&linear->producer, __ATOMIC_ACQUIRE);
+
+	if (producer > consumer) {
+		int nr = producer - consumer;
+		int off = consumer % LINR_SZ;
+		int cap = LINR_SZ - off;
+
+		fprintf(stderr, "consuming %d linear\n", nr);
+
+		print_nonzero_bytes(linear->data + off, cap < nr ? cap : nr);
+		nr -= cap;
+		if (nr > 0)
+			print_nonzero_bytes(linear->data, nr);
+	}
+
+	__atomic_store_n(&linear->consumer, producer, __ATOMIC_RELAXED);
+}
+
+static void do_server_mrq(struct memory_buffer *mem, char *tmp_mem, int client_fd, size_t *page_aligned_frags, size_t *non_page_aligned_frags)
 {
 	char ctrl_data[sizeof(int) * 20000];
-	struct netdev_queue_id *queues;
+	struct dmabuf_token *dmabuf_token;
+	struct dmabuf_cmsg *dmabuf_cmsg;
+	size_t total_received = 0;
+	struct devmem_ring *linear;
+	struct devmem_ring *token;
+	struct devmem_ring *cmsg;
+	bool is_devmem = false;
+	char iobuf[819200];
+	bool fin = false;
+	int i;
+
+	enable_mrq(client_fd, &cmsg, &token, &linear);
+
+	int cmsg_producer, cmsg_consumer;
+	int token_producer, token_consumer;
+	int nr, token_nr = 0;
+
+	token_producer = __atomic_load_n(&token->producer, __ATOMIC_RELAXED);
+	cmsg_consumer = __atomic_load_n(&cmsg->consumer, __ATOMIC_RELAXED);
+
+	while (1) {
+		if (__atomic_load_n(&cmsg->producer_err, __ATOMIC_RELAXED)) {
+			fprintf(stderr, "got %d consumer errors)\n", __atomic_load_n(&cmsg->producer_err, __ATOMIC_RELAXED));
+			break;
+		}
+
+		cmsg_producer = __atomic_load_n(&cmsg->producer, __ATOMIC_ACQUIRE);
+		if (cmsg_producer == cmsg_consumer) {
+			continue;
+		}
+
+		token_nr = 0;
+		nr = cmsg_producer - cmsg_consumer;
+		fprintf(stderr, "got %d (%d %d) iovecs\n", nr, cmsg_producer, cmsg_consumer);
+
+		for (i = 0; i < nr; i++) {
+			dmabuf_cmsg = &cmsg->cmsg[(cmsg_consumer + i) % CMSG_SZ];
+
+			if (handle_token(mem, dmabuf_cmsg, tmp_mem, &total_received, page_aligned_frags, non_page_aligned_frags)) {
+				fin = true;
+				break;
+			}
+
+			dmabuf_token = &token->token[(token_producer + i) % TOKN_SZ];
+			dmabuf_token->token_start = dmabuf_cmsg->frag_token;
+			dmabuf_token->token_count = dmabuf_cmsg->flags;;
+			token_nr++;
+		}
+
+		if (token_nr) {
+			token_producer += token_nr;
+
+			token_consumer = __atomic_load_n(&token->consumer, __ATOMIC_RELAXED);
+			if (token_producer - token_consumer >= TOKN_SZ) {
+				fprintf(stderr, "completions ring overflow (%d %d)\n", token_producer, token_consumer);
+				break;
+			}
+
+			/* TODO: batch token refill */
+			__atomic_store_n(&token->producer, token_producer, __ATOMIC_RELEASE);
+		}
+
+		cmsg_consumer += nr;
+
+		__atomic_store_n(&cmsg->consumer, cmsg_producer, __ATOMIC_RELEASE); /* TODO: backpressure? */
+
+		mrq_linear(linear);
+
+		if (fin)
+			break;
+	}
+
+	sleep(1);
+
+	mrq_linear(linear);
+}
+
+static void do_server_syscall(struct memory_buffer *mem, char *tmp_mem, int client_fd, size_t *page_aligned_frags, size_t *non_page_aligned_frags)
+{
+	char ctrl_data[sizeof(int) * 20000];
+	size_t total_received = 0;
+	bool is_devmem = false;
+	char iobuf[819200];
+	int i;
+
+	while (1) {
+		struct iovec iov = { .iov_base = iobuf,
+				     .iov_len = sizeof(iobuf) };
+		struct dmabuf_cmsg *dmabuf_cmsg = NULL;
+		struct cmsghdr *cm = NULL;
+		struct msghdr msg = { 0 };
+		struct dmabuf_token token;
+		ssize_t ret;
+
+		is_devmem = false;
+
+		msg.msg_iov = &iov;
+		msg.msg_iovlen = 1;
+		msg.msg_control = ctrl_data;
+		msg.msg_controllen = sizeof(ctrl_data);
+		ret = recvmsg(client_fd, &msg, MSG_SOCK_DEVMEM);
+		fprintf(stderr, "recvmsg ret=%ld\n", ret);
+		if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			continue;
+		if (ret < 0) {
+			perror("recvmsg");
+			continue;
+		}
+		if (ret == 0) {
+			fprintf(stderr, "client exited\n");
+			break;
+		}
+
+		i++;
+		for (cm = CMSG_FIRSTHDR(&msg); cm; cm = CMSG_NXTHDR(&msg, cm)) {
+			if (cm->cmsg_level != SOL_SOCKET ||
+			    (cm->cmsg_type != SCM_DEVMEM_DMABUF &&
+			     cm->cmsg_type != SCM_DEVMEM_LINEAR)) {
+				fprintf(stderr, "skipping non-devmem cmsg\n");
+				continue;
+			}
+
+			dmabuf_cmsg = (struct dmabuf_cmsg *)CMSG_DATA(cm);
+			is_devmem = true;
+
+			if (cm->cmsg_type == SCM_DEVMEM_LINEAR) {
+				/* TODO: process data copied from skb's linear
+				 * buffer.
+				 */
+				fprintf(stderr,
+					"SCM_DEVMEM_LINEAR. dmabuf_cmsg->frag_size=%u\n",
+					dmabuf_cmsg->frag_size);
+
+				continue;
+			}
+
+			handle_token(mem, dmabuf_cmsg, tmp_mem, &total_received, page_aligned_frags, non_page_aligned_frags);
+
+			token.token_start = dmabuf_cmsg->frag_token;
+			token.token_count = 1;
+
+			ret = setsockopt(client_fd, SOL_SOCKET,
+					 SO_DEVMEM_DONTNEED, &token,
+					 sizeof(token));
+			if (ret != 1)
+				error(1, 0,
+				      "SO_DEVMEM_DONTNEED not enough tokens");
+		}
+		if (!is_devmem)
+			error(1, 0, "flow steering error\n");
+
+		fprintf(stderr, "total_received=%lu\n", total_received);
+	}
+}
+
+static int do_server(struct memory_buffer *mem)
+{
 	size_t non_page_aligned_frags = 0;
+	struct netdev_queue_id *queues;
 	struct sockaddr_in6 client_addr;
 	struct sockaddr_in6 server_sin;
 	size_t page_aligned_frags = 0;
 	struct ynl_sock *ys = NULL;
-	size_t total_received = 0;
 	socklen_t client_addr_len;
-	bool is_devmem = false;
 	char *tmp_mem = NULL;
-	char iobuf[819200];
 	char buffer[256];
 	int socket_fd;
 	int client_fd;
@@ -597,101 +873,10 @@ static int do_server(struct memory_buffer *mem)
 	fprintf(stderr, "Got connection from %s:%d\n", buffer,
 		ntohs(client_addr.sin6_port));
 
-	while (1) {
-		struct iovec iov = { .iov_base = iobuf,
-				     .iov_len = sizeof(iobuf) };
-		struct dmabuf_cmsg *dmabuf_cmsg = NULL;
-		struct cmsghdr *cm = NULL;
-		struct msghdr msg = { 0 };
-		struct dmabuf_token token;
-		ssize_t ret;
-
-		is_devmem = false;
-
-		msg.msg_iov = &iov;
-		msg.msg_iovlen = 1;
-		msg.msg_control = ctrl_data;
-		msg.msg_controllen = sizeof(ctrl_data);
-		ret = recvmsg(client_fd, &msg, MSG_SOCK_DEVMEM);
-		fprintf(stderr, "recvmsg ret=%ld\n", ret);
-		if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-			continue;
-		if (ret < 0) {
-			perror("recvmsg");
-			continue;
-		}
-		if (ret == 0) {
-			fprintf(stderr, "client exited\n");
-			break;
-		}
-
-		i++;
-		for (cm = CMSG_FIRSTHDR(&msg); cm; cm = CMSG_NXTHDR(&msg, cm)) {
-			if (cm->cmsg_level != SOL_SOCKET ||
-			    (cm->cmsg_type != SCM_DEVMEM_DMABUF &&
-			     cm->cmsg_type != SCM_DEVMEM_LINEAR)) {
-				fprintf(stderr, "skipping non-devmem cmsg\n");
-				continue;
-			}
-
-			dmabuf_cmsg = (struct dmabuf_cmsg *)CMSG_DATA(cm);
-			is_devmem = true;
-
-			if (cm->cmsg_type == SCM_DEVMEM_LINEAR) {
-				/* TODO: process data copied from skb's linear
-				 * buffer.
-				 */
-				fprintf(stderr,
-					"SCM_DEVMEM_LINEAR. dmabuf_cmsg->frag_size=%u\n",
-					dmabuf_cmsg->frag_size);
-
-				continue;
-			}
-
-			token.token_start = dmabuf_cmsg->frag_token;
-			token.token_count = 1;
-
-			total_received += dmabuf_cmsg->frag_size;
-			fprintf(stderr,
-				"received frag_page=%llu, in_page_offset=%llu, frag_offset=%llu, frag_size=%u, token=%u, total_received=%lu, dmabuf_id=%u\n",
-				dmabuf_cmsg->frag_offset >> PAGE_SHIFT,
-				dmabuf_cmsg->frag_offset % getpagesize(),
-				dmabuf_cmsg->frag_offset,
-				dmabuf_cmsg->frag_size, dmabuf_cmsg->frag_token,
-				total_received, dmabuf_cmsg->dmabuf_id);
-
-			if (dmabuf_cmsg->dmabuf_id != dmabuf_id)
-				error(1, 0,
-				      "received on wrong dmabuf_id: flow steering error\n");
-
-			if (dmabuf_cmsg->frag_size % getpagesize())
-				non_page_aligned_frags++;
-			else
-				page_aligned_frags++;
-
-			provider->memcpy_from_device(tmp_mem, mem,
-						     dmabuf_cmsg->frag_offset,
-						     dmabuf_cmsg->frag_size);
-
-			if (do_validation)
-				validate_buffer(tmp_mem,
-						dmabuf_cmsg->frag_size);
-			else
-				print_nonzero_bytes(tmp_mem,
-						    dmabuf_cmsg->frag_size);
-
-			ret = setsockopt(client_fd, SOL_SOCKET,
-					 SO_DEVMEM_DONTNEED, &token,
-					 sizeof(token));
-			if (ret != 1)
-				error(1, 0,
-				      "SO_DEVMEM_DONTNEED not enough tokens");
-		}
-		if (!is_devmem)
-			error(1, 0, "flow steering error\n");
-
-		fprintf(stderr, "total_received=%lu\n", total_received);
-	}
+	if (mrq)
+		do_server_mrq(mem, tmp_mem, client_fd, &page_aligned_frags, &non_page_aligned_frags);
+	else
+		do_server_syscall(mem, tmp_mem, client_fd, &page_aligned_frags, &non_page_aligned_frags);
 
 	fprintf(stderr, "%s: ok\n", TEST_PREFIX);
 
@@ -948,7 +1133,7 @@ int main(int argc, char *argv[])
 	int is_server = 0, opt;
 	int ret;
 
-	while ((opt = getopt(argc, argv, "Lls:b:c:p:v:q:t:f:")) != -1) {
+	while ((opt = getopt(argc, argv, "Lls:b:c:p:v:q:t:f:QR")) != -1) {
 		switch (opt) {
 		case 'l':
 			is_server = 1;
@@ -979,6 +1164,12 @@ int main(int argc, char *argv[])
 			break;
 		case 'f':
 			ifname = optarg;
+			break;
+		case 'R':
+			mrq_skip_xa = !mrq_skip_xa;
+			break;
+		case 'Q':
+			mrq = !mrq;
 			break;
 		case '?':
 			fprintf(stderr, "unknown option: %c\n", optopt);
