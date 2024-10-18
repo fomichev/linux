@@ -3532,6 +3532,9 @@ void sock_def_readable(struct sock *sk)
 
 	trace_sk_data_ready(sk);
 
+	if (tcp_mrq_recv(sk) > 0)
+		return;
+
 	rcu_read_lock();
 	wq = rcu_dereference(sk->sk_wq);
 	if (skwq_has_sleeper(wq))

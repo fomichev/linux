@@ -777,6 +777,14 @@ static inline int tcp_bound_to_half_wnd(struct tcp_sock *tp, int pktsize)
 		return pktsize;
 }
 
+/* tcp_mrq.c */
+int tcp_mrq_alloc(struct sock *sk, struct tcp_mrq_alloc *opt);
+int tcp_mrq_activate(struct sock *sk, struct tcp_mrq_activate *opt);
+void tcp_mrq_shutdown(struct sock *sk);
+int tcp_mrq_mmap(struct file *file, struct socket *sock, struct vm_area_struct *vma);
+void tcp_mrq_comp(struct sock *sk);
+int tcp_mrq_recv(struct sock *sk);
+
 /* tcp.c */
 void tcp_get_info(struct sock *, struct tcp_info *);
 
@@ -789,6 +797,18 @@ int tcp_read_sock_noack(struct sock *sk, read_descriptor_t *desc,
 int tcp_read_skb(struct sock *sk, skb_read_actor_t recv_actor);
 struct sk_buff *tcp_recv_skb(struct sock *sk, u32 seq, u32 *off);
 void tcp_read_done(struct sock *sk, size_t len);
+
+/* batch __xa_alloc() calls and reduce xa_lock()/xa_unlock() overhead. */
+struct tcp_xa_pool {
+	u8		max; /* max <= MAX_SKB_FRAGS */
+	u8		idx; /* idx <= max */
+	__u32		tokens[MAX_SKB_FRAGS];
+	netmem_ref	netmems[MAX_SKB_FRAGS];
+};
+
+void tcp_xa_pool_commit(struct sock *sk, struct tcp_xa_pool *p);
+int tcp_xa_pool_refill(struct sock *sk, struct tcp_xa_pool *p,
+		       unsigned int max_frags);
 
 void tcp_initialize_rcv_mss(struct sock *sk);
 

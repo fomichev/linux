@@ -2535,8 +2535,10 @@ static void tcp_release_user_frags(struct sock *sk)
 	unsigned long index;
 	void *netmem;
 
+	tcp_mrq_comp(sk);
 	xa_for_each(&sk->sk_user_frags, index, netmem)
 		WARN_ON_ONCE(!napi_pp_put_page((__force netmem_ref)netmem));
+	tcp_mrq_shutdown(sk);
 #endif
 }
 

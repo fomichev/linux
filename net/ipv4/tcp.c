@@ -284,6 +284,7 @@
 #include <net/hotdata.h>
 #include <trace/events/tcp.h>
 #include <net/rps.h>
+#include <linux/skbuff_ref.h>
 
 #include "../core/devmem.h"
 
@@ -1823,6 +1824,9 @@ static const struct vm_operations_struct tcp_vm_ops = {
 int tcp_mmap(struct file *file, struct socket *sock,
 	     struct vm_area_struct *vma)
 {
+	if (vma->vm_pgoff == 1 || vma->vm_pgoff == 2 || vma->vm_pgoff == 3)
+		return tcp_mrq_mmap(file, sock, vma);
+
 	if (vma->vm_flags & (VM_WRITE | VM_EXEC))
 		return -EPERM;
 	vm_flags_clear(vma, VM_MAYWRITE | VM_MAYEXEC);
@@ -2393,14 +2397,6 @@ static int tcp_inq_hint(struct sock *sk)
 	return inq;
 }
 
-/* batch __xa_alloc() calls and reduce xa_lock()/xa_unlock() overhead. */
-struct tcp_xa_pool {
-	u8		max; /* max <= MAX_SKB_FRAGS */
-	u8		idx; /* idx <= max */
-	__u32		tokens[MAX_SKB_FRAGS];
-	netmem_ref	netmems[MAX_SKB_FRAGS];
-};
-
 static void tcp_xa_pool_commit_locked(struct sock *sk, struct tcp_xa_pool *p)
 {
 	int i;
@@ -2417,7 +2413,7 @@ static void tcp_xa_pool_commit_locked(struct sock *sk, struct tcp_xa_pool *p)
 	p->idx = 0;
 }
 
-static void tcp_xa_pool_commit(struct sock *sk, struct tcp_xa_pool *p)
+void tcp_xa_pool_commit(struct sock *sk, struct tcp_xa_pool *p)
 {
 	if (!p->max)
 		return;
@@ -2429,8 +2425,8 @@ static void tcp_xa_pool_commit(struct sock *sk, struct tcp_xa_pool *p)
 	xa_unlock_bh(&sk->sk_user_frags);
 }
 
-static int tcp_xa_pool_refill(struct sock *sk, struct tcp_xa_pool *p,
-			      unsigned int max_frags)
+int tcp_xa_pool_refill(struct sock *sk, struct tcp_xa_pool *p,
+		       unsigned int max_frags)
 {
 	int err, k;
 
@@ -3771,6 +3767,28 @@ int do_tcp_setsockopt(struct sock *sk, int level, int optname,
 
 	/* These are data/string values, all the others are ints */
 	switch (optname) {
+	case TCP_MRQ_ALLOC: {
+		struct tcp_mrq_alloc opt;
+
+		if (copy_from_sockptr(&opt, optval, sizeof(opt)))
+			return -EFAULT;
+
+		sockopt_lock_sock(sk);
+		err = tcp_mrq_alloc(sk, &opt);
+		sockopt_release_sock(sk);
+		return err;
+	}
+	case TCP_MRQ_ACTIVATE: {
+		struct tcp_mrq_activate opt;
+
+		if (copy_from_sockptr(&opt, optval, sizeof(opt)))
+			return -EFAULT;
+
+		sockopt_lock_sock(sk);
+		err = tcp_mrq_activate(sk, &opt);
+		sockopt_release_sock(sk);
+		return err;
+	}
 	case TCP_CONGESTION: {
 		char name[TCP_CA_NAME_MAX];
 

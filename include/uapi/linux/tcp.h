@@ -140,10 +140,23 @@ enum {
 
 #define TCP_IS_MPTCP		43	/* Is MPTCP being used? */
 #define TCP_RTO_MAX_MS		44	/* max rto time in ms */
+#define TCP_MRQ_ALLOC		45
+#define TCP_MRQ_ACTIVATE	46
 
 #define TCP_REPAIR_ON		1
 #define TCP_REPAIR_OFF		0
 #define TCP_REPAIR_OFF_NO_WP	-1	/* Turn off without window probes */
+
+struct tcp_mrq_alloc {
+	__u64 size;
+};
+
+struct tcp_mrq_activate {
+	__u64 skip_xa:1;
+	__u64 skip_copy:1;
+	__u64 skip_wakeup:1;
+	__u64 pad:61;
+};
 
 struct tcp_repair_opt {
 	__u32	opt_code;
