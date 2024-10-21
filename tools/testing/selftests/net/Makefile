@@ -107,7 +107,7 @@ TEST_PROGS += busy_poll_test.sh
 TEST_GEN_PROGS += proc_net_pktgen
 
 # YNL files, must be before "include ..lib.mk"
-YNL_GEN_FILES := busy_poller netlink-dumps
+YNL_GEN_FILES := busy_poller netlink-dumps mrqcat
 TEST_GEN_FILES += $(YNL_GEN_FILES)
 
 TEST_FILES := settings
