@@ -3897,6 +3897,7 @@ EXPORT_SYMBOL(skb_csum_hwoffload_help);
 static struct sk_buff *validate_xmit_unreadable_skb(struct sk_buff *skb,
 						    struct net_device *dev)
 {
+#if 0
 	struct skb_shared_info *shinfo;
 	struct net_iov *niov;
 
@@ -3921,6 +3922,9 @@ out:
 out_free:
 	kfree_skb(skb);
 	return NULL;
+#else
+	return skb;
+#endif
 }
 
 static struct sk_buff *validate_xmit_skb(struct sk_buff *skb, struct net_device *dev, bool *again)
