@@ -1003,8 +1003,10 @@ bool napi_pp_put_page(netmem_ref netmem)
 	 * and page_is_pfmemalloc() is checked in __page_pool_put_page()
 	 * to avoid recycling the pfmemalloc page.
 	 */
-	if (unlikely(!is_pp_netmem(netmem)))
-		return false;
+	if (unlikely(!is_pp_netmem(netmem))) {
+		/* avoid triggering WARN_ON's for loopback mode */
+		return true;
+	}
 
 	page_pool_put_full_netmem(netmem_get_pp(netmem), netmem, false);
 
@@ -1946,11 +1948,11 @@ int skb_copy_ubufs(struct sk_buff *skb, gfp_t gfp_mask)
 	int i, order, psize, new_frags;
 	u32 d_off;
 
+	if (!skb_frags_readable(skb))
+		return 0;
+
 	if (skb_shared(skb) || skb_unclone(skb, gfp_mask))
 		return -EINVAL;
-
-	if (!skb_frags_readable(skb))
-		return -EFAULT;
 
 	if (!num_frags)
 		goto release;

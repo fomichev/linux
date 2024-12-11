@@ -379,7 +379,9 @@ struct net_devmem_dmabuf_binding *net_devmem_get_binding(struct sock *sk,
 							 unsigned int dmabuf_id)
 {
 	struct net_devmem_dmabuf_binding *binding;
+#if 0
 	struct dst_entry *dst = __sk_dst_get(sk);
+#endif
 	int err = 0;
 
 	binding = net_devmem_lookup_dmabuf(dmabuf_id);
@@ -388,6 +390,7 @@ struct net_devmem_dmabuf_binding *net_devmem_get_binding(struct sock *sk,
 		goto out_err;
 	}
 
+#if 0
 	/* The dma-addrs in this binding are only reachable to the corresponding
 	 * net_device.
 	 */
@@ -395,6 +398,7 @@ struct net_devmem_dmabuf_binding *net_devmem_get_binding(struct sock *sk,
 		err = -ENODEV;
 		goto out_err;
 	}
+#endif
 
 	return binding;
 
