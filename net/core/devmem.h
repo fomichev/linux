@@ -10,9 +10,12 @@
 #ifndef _NET_DEVMEM_H
 #define _NET_DEVMEM_H
 
+#include <linux/dma-direction.h>
+
 struct netlink_ext_ack;
 
 struct net_devmem_dmabuf_binding {
+	enum dma_data_direction direction;
 	struct dma_buf *dmabuf;
 	struct dma_buf_attachment *attachment;
 	struct sg_table *sgt;

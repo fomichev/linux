@@ -59,7 +59,7 @@ void __net_devmem_dmabuf_binding_free(struct net_devmem_dmabuf_binding *binding)
 		gen_pool_destroy(binding->chunk_pool);
 
 	dma_buf_unmap_attachment_unlocked(binding->attachment, binding->sgt,
-					  DMA_FROM_DEVICE);
+					  binding->direction);
 	dma_buf_detach(binding->dmabuf, binding->attachment);
 	dma_buf_put(binding->dmabuf);
 	xa_destroy(&binding->bound_rxqs);
@@ -173,16 +173,13 @@ err_xa_erase:
 	return err;
 }
 
-struct net_devmem_dmabuf_binding *
-net_devmem_bind_dmabuf(struct net_device *dev, unsigned int dmabuf_fd,
-		       struct netlink_ext_ack *extack)
+static struct net_devmem_dmabuf_binding *
+net_devmem_binding_alloc(struct net_device *dev,
+			 enum dma_data_direction direction,
+			 unsigned int dmabuf_fd, struct netlink_ext_ack *extack)
 {
 	struct net_devmem_dmabuf_binding *binding;
-	static u32 id_alloc_next;
-	struct scatterlist *sg;
 	struct dma_buf *dmabuf;
-	unsigned int sg_idx, i;
-	unsigned long virtual;
 	int err;
 
 	dmabuf = dma_buf_get(dmabuf_fd);
@@ -197,12 +194,7 @@ net_devmem_bind_dmabuf(struct net_device *dev, unsigned int dmabuf_fd,
 	}
 
 	binding->dev = dev;
-
-	err = xa_alloc_cyclic(&net_devmem_dmabuf_bindings, &binding->id,
-			      binding, xa_limit_32b, &id_alloc_next,
-			      GFP_KERNEL);
-	if (err < 0)
-		goto err_free_binding;
+	binding->direction = direction;
 
 	xa_init_flags(&binding->bound_rxqs, XA_FLAGS_ALLOC);
 
@@ -214,16 +206,48 @@ net_devmem_bind_dmabuf(struct net_device *dev, unsigned int dmabuf_fd,
 	if (IS_ERR(binding->attachment)) {
 		err = PTR_ERR(binding->attachment);
 		NL_SET_ERR_MSG(extack, "Failed to bind dmabuf to device");
-		goto err_free_id;
+		goto err_free_binding;
 	}
 
 	binding->sgt = dma_buf_map_attachment_unlocked(binding->attachment,
-						       DMA_FROM_DEVICE);
+						       direction);
 	if (IS_ERR(binding->sgt)) {
 		err = PTR_ERR(binding->sgt);
 		NL_SET_ERR_MSG(extack, "Failed to map dmabuf attachment");
 		goto err_detach;
 	}
+
+	/* dma_buf_map_attachment_unlocked can return non-zero sgt with
+	 * zero entries
+	 */
+	if (!binding->sgt || binding->sgt->nents == 0) {
+		err = -EINVAL;
+		NL_SET_ERR_MSG(extack, "Empty dmabuf attachment");
+		goto err_unmap;
+	}
+
+	return binding;
+
+err_unmap:
+	dma_buf_unmap_attachment_unlocked(binding->attachment, binding->sgt,
+					  direction);
+err_detach:
+	dma_buf_detach(dmabuf, binding->attachment);
+err_free_binding:
+	kfree(binding);
+err_put_dmabuf:
+	dma_buf_put(dmabuf);
+	return ERR_PTR(err);
+}
+
+static int
+net_devmem_binding_populate(struct net_device *dev,
+			    struct net_devmem_dmabuf_binding *binding)
+{
+	struct scatterlist *sg;
+	unsigned int sg_idx, i;
+	unsigned long virtual;
+	int err;
 
 	/* For simplicity we expect to make PAGE_SIZE allocations, but the
 	 * binding can be much more flexible than that. We may be able to
@@ -231,10 +255,8 @@ net_devmem_bind_dmabuf(struct net_device *dev, unsigned int dmabuf_fd,
 	 */
 	binding->chunk_pool =
 		gen_pool_create(PAGE_SHIFT, dev_to_node(&dev->dev));
-	if (!binding->chunk_pool) {
-		err = -ENOMEM;
-		goto err_unmap;
-	}
+	if (!binding->chunk_pool)
+		return -ENOMEM;
 
 	virtual = 0;
 	for_each_sgtable_dma_sg(binding->sgt, sg, sg_idx) {
@@ -282,23 +304,45 @@ net_devmem_bind_dmabuf(struct net_device *dev, unsigned int dmabuf_fd,
 		virtual += len;
 	}
 
-	return binding;
+	return 0;
 
 err_free_chunks:
 	gen_pool_for_each_chunk(binding->chunk_pool,
 				net_devmem_dmabuf_free_chunk_owner, NULL);
 	gen_pool_destroy(binding->chunk_pool);
-err_unmap:
-	dma_buf_unmap_attachment_unlocked(binding->attachment, binding->sgt,
-					  DMA_FROM_DEVICE);
-err_detach:
-	dma_buf_detach(dmabuf, binding->attachment);
+
+	return err;
+}
+
+struct net_devmem_dmabuf_binding *
+net_devmem_bind_dmabuf(struct net_device *dev, unsigned int dmabuf_fd,
+		       struct netlink_ext_ack *extack)
+{
+	struct net_devmem_dmabuf_binding *binding;
+	static u32 id_alloc_next;
+	int err;
+
+	binding = net_devmem_binding_alloc(dev, DMA_FROM_DEVICE, dmabuf_fd,
+					   extack);
+	if (IS_ERR(binding))
+		return binding;
+
+	err = xa_alloc_cyclic(&net_devmem_dmabuf_bindings, &binding->id,
+			      binding, xa_limit_32b, &id_alloc_next,
+			      GFP_KERNEL);
+	if (err < 0)
+		goto err_free_binding;
+
+	err = net_devmem_binding_populate(dev, binding);
+	if (err < 0)
+		goto err_free_id;
+
+	return binding;
+
 err_free_id:
 	xa_erase(&net_devmem_dmabuf_bindings, binding->id);
 err_free_binding:
-	kfree(binding);
-err_put_dmabuf:
-	dma_buf_put(dmabuf);
+	__net_devmem_dmabuf_binding_free(binding);
 	return ERR_PTR(err);
 }
 
