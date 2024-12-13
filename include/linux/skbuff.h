@@ -2623,15 +2623,15 @@ static inline void skb_fill_page_desc_noacc(struct sk_buff *skb, int i,
 	shinfo->nr_frags = i + 1;
 }
 
-void skb_add_rx_frag_netmem(struct sk_buff *skb, int i, netmem_ref netmem,
-			    int off, int size, unsigned int truesize);
+void skb_add_frag_netmem(struct sk_buff *skb, int i, netmem_ref netmem,
+			 int off, int size, unsigned int truesize);
 
 static inline void skb_add_rx_frag(struct sk_buff *skb, int i,
 				   struct page *page, int off, int size,
 				   unsigned int truesize)
 {
-	skb_add_rx_frag_netmem(skb, i, page_to_netmem(page), off, size,
-			       truesize);
+	skb_add_frag_netmem(skb, i, page_to_netmem(page), off, size,
+			    truesize);
 }
 
 void skb_coalesce_rx_frag(struct sk_buff *skb, int i, int size,
