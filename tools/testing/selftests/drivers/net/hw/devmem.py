@@ -68,12 +68,32 @@ def check_txrx(cfg) -> None:
     ksft_eq(socat.stdout.strip().split(" ")[0], want_sha.split(" ")[0])
 
 
+@ksft_disruptive
+def check_txrx_chunked(cfg) -> None:
+    cfg.require_v6()
+    require_devmem(cfg)
+
+    max_chunk = 2039 # closest prime to PAGE_SIZE/2 to add some drift
+
+    cmd(f"cat /dev/urandom | tr -dc '[:print:]' | head -c 1M > random_file.txt", host=cfg.remote, shell=True)
+    want_sha = cmd(f"sha256sum random_file.txt", host=cfg.remote, shell=True).stdout.strip()
+
+    port = rand_port()
+    listen_cmd = f"{cfg.bin_local} -l -f {cfg.ifname} -s {cfg.v6} -p {port} | tee random_file.txt | sha256sum -"
+
+    with bkg(listen_cmd, exit_wait=True) as socat:
+        wait_port_listen(port)
+        cmd(f"cat random_file.txt | {cfg.bin_remote} -f {cfg.ifname} -s {cfg.v6} -p {port} -b {max_chunk}", host=cfg.remote, shell=True)
+
+    ksft_eq(socat.stdout.strip().split(" ")[0], want_sha.split(" ")[0])
+
+
 def main() -> None:
     with NetDrvEpEnv(__file__) as cfg:
         cfg.bin_local = path.abspath(path.dirname(__file__) + "/ncdevmem")
         cfg.bin_remote = cfg.remote.deploy(cfg.bin_local)
 
-        ksft_run([check_tx, check_rx, check_txrx],
+        ksft_run([check_tx, check_rx, check_txrx, check_txrx_chunked],
                  args=(cfg, ))
     ksft_exit()
 
