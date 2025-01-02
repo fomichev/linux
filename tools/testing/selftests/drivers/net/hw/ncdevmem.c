@@ -81,6 +81,7 @@ static char *ifname;
 static unsigned int ifindex;
 static unsigned int dmabuf_id;
 static unsigned int tx_dmabuf_id;
+static unsigned int max_chunk = 0;
 
 struct memory_buffer {
 	int fd;
@@ -875,6 +876,9 @@ static int do_client(struct memory_buffer *mem)
 			struct msghdr msg = {};
 			struct cmsghdr *cmsg;
 
+			if (max_chunk > 0 && iov.iov_len > max_chunk)
+				iov.iov_len = max_chunk;
+
 			msg.msg_iov = &iov;
 			msg.msg_iovlen = 1;
 
@@ -897,6 +901,9 @@ static int do_client(struct memory_buffer *mem)
 			line_size -= ret;
 
 			wait_compl(socket_fd);
+
+			if (ret == 0)
+				break;
 		}
 	}
 
@@ -917,13 +924,16 @@ int main(int argc, char *argv[])
 	int is_server = 0, opt;
 	int ret;
 
-	while ((opt = getopt(argc, argv, "ls:c:p:v:q:t:f:")) != -1) {
+	while ((opt = getopt(argc, argv, "ls:b:c:p:v:q:t:f:")) != -1) {
 		switch (opt) {
 		case 'l':
 			is_server = 1;
 			break;
 		case 's':
 			server_ip = optarg;
+			break;
+		case 'b':
+			max_chunk = atoi(optarg);
 			break;
 		case 'c':
 			client_ip = optarg;
