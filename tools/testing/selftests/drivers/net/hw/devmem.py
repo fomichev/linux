@@ -41,7 +41,7 @@ def check_tx(cfg) -> None:
     require_devmem(cfg)
 
     port = rand_port()
-    listen_cmd = f"socat -U - TCP6-LISTEN:{port},bind={cfg.addr_v['6']}"
+    listen_cmd = f"socat -U - TCP6-LISTEN:{port},bind=[{cfg.addr_v['6']}]"
 
     with bkg(listen_cmd, exit_wait=True) as socat:
         wait_port_listen(port)
