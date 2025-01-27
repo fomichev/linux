@@ -166,6 +166,30 @@
 #include "devmem.h"
 #include "net-sysfs.h"
 
+static void netdev_maybe_lock(struct net_device *dev)
+{
+	bool needs_locking = false;
+
+#if IS_ENABLED(CONFIG_NET_SHAPER)
+	needs_locking |= !!(dev)->netdev_ops->net_shaper_ops;
+#endif
+
+	if (needs_locking)
+		netdev_lock(dev);
+}
+
+static void netdev_maybe_unlock(struct net_device *dev)
+{
+	bool needs_locking = false;
+
+#if IS_ENABLED(CONFIG_NET_SHAPER)
+	needs_locking |= !!(dev)->netdev_ops->net_shaper_ops;
+#endif
+
+	if (needs_locking)
+		netdev_unlock(dev);
+}
+
 static DEFINE_SPINLOCK(ptype_lock);
 struct list_head ptype_base[PTYPE_HASH_SIZE] __read_mostly;
 
@@ -1600,8 +1624,10 @@ static int __dev_open(struct net_device *dev, struct netlink_ext_ack *extack)
 	if (ops->ndo_validate_addr)
 		ret = ops->ndo_validate_addr(dev);
 
+	netdev_maybe_lock(dev);
 	if (!ret && ops->ndo_open)
 		ret = ops->ndo_open(dev);
+	netdev_maybe_unlock(dev);
 
 	netpoll_poll_enable(dev);
 
@@ -1684,8 +1710,10 @@ static void __dev_close_many(struct list_head *head)
 		 *	We allow it to be called even after a DETACH hot-plug
 		 *	event.
 		 */
+		netdev_maybe_lock(dev);
 		if (ops->ndo_stop)
 			ops->ndo_stop(dev);
+		netdev_maybe_unlock(dev);
 
 		netif_set_up(dev, false);
 		netpoll_poll_enable(dev);
