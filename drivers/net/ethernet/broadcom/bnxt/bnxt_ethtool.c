@@ -4959,12 +4959,14 @@ static void bnxt_self_test(struct net_device *dev, struct ethtool_test *etest,
 	if (!offline) {
 		bnxt_run_fw_tests(bp, test_mask, &test_results);
 	} else {
+		netdev_lock(dev);
 		bnxt_close_nic(bp, true, false);
 		bnxt_run_fw_tests(bp, test_mask, &test_results);
 
 		rc = bnxt_half_open_nic(bp);
 		if (rc) {
 			etest->flags |= ETH_TEST_FL_FAILED;
+			netdev_unlock(dev);
 			return;
 		}
 		buf[BNXT_MACLPBK_TEST_IDX] = 1;
@@ -5004,6 +5006,7 @@ skip_phy_loopback:
 		bnxt_hwrm_phy_loopback(bp, false, false);
 		bnxt_half_close_nic(bp);
 		rc = bnxt_open_nic(bp, true, true);
+		netdev_unlock(dev);
 	}
 	if (rc || bnxt_test_irq(bp)) {
 		buf[BNXT_IRQ_TEST_IDX] = 1;

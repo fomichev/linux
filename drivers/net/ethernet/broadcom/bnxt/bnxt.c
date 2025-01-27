@@ -11300,7 +11300,7 @@ static int bnxt_request_irq(struct bnxt *bp)
 		if (rc)
 			break;
 
-		netif_napi_set_irq(&bp->bnapi[i]->napi, irq->vector);
+		netif_napi_set_irq_locked(&bp->bnapi[i]->napi, irq->vector);
 		irq->requested = 1;
 
 		if (zalloc_cpumask_var(&irq->cpu_mask, GFP_KERNEL)) {
@@ -11336,9 +11336,9 @@ static void bnxt_del_napi(struct bnxt *bp)
 	for (i = 0; i < bp->cp_nr_rings; i++) {
 		struct bnxt_napi *bnapi = bp->bnapi[i];
 
-		__netif_napi_del(&bnapi->napi);
+		__netif_napi_del_locked(&bnapi->napi);
 	}
-	/* We called __netif_napi_del(), we need
+	/* We called __netif_napi_del_locked(), we need
 	 * to respect an RCU grace period before freeing napi structures.
 	 */
 	synchronize_net();
@@ -11351,18 +11351,20 @@ static void bnxt_init_napi(struct bnxt *bp)
 	struct bnxt_napi *bnapi;
 	int i;
 
+	netdev_assert_locked(bp->dev);
+
 	if (bp->flags & BNXT_FLAG_CHIP_P5_PLUS)
 		poll_fn = bnxt_poll_p5;
 	else if (BNXT_CHIP_TYPE_NITRO_A0(bp))
 		cp_nr_rings--;
 	for (i = 0; i < cp_nr_rings; i++) {
 		bnapi = bp->bnapi[i];
-		netif_napi_add_config(bp->dev, &bnapi->napi, poll_fn,
-				      bnapi->index);
+		netif_napi_add_config_locked(bp->dev, &bnapi->napi, poll_fn,
+					     bnapi->index);
 	}
 	if (BNXT_CHIP_TYPE_NITRO_A0(bp)) {
 		bnapi = bp->bnapi[cp_nr_rings];
-		netif_napi_add(bp->dev, &bnapi->napi, bnxt_poll_nitroa0);
+		netif_napi_add_locked(bp->dev, &bnapi->napi, bnxt_poll_nitroa0);
 	}
 }
 
@@ -11374,6 +11376,8 @@ static void bnxt_disable_napi(struct bnxt *bp)
 	    test_and_set_bit(BNXT_STATE_NAPI_DISABLED, &bp->state))
 		return;
 
+	netdev_assert_locked(bp->dev);
+
 	for (i = 0; i < bp->cp_nr_rings; i++) {
 		struct bnxt_napi *bnapi = bp->bnapi[i];
 		struct bnxt_cp_ring_info *cpr;
@@ -11383,13 +11387,15 @@ static void bnxt_disable_napi(struct bnxt *bp)
 			cpr->sw_stats->tx.tx_resets++;
 		if (bnapi->in_reset)
 			cpr->sw_stats->rx.rx_resets++;
-		napi_disable(&bnapi->napi);
+		napi_disable_locked(&bnapi->napi);
 	}
 }
 
 static void bnxt_enable_napi(struct bnxt *bp)
 {
 	int i;
+
+	netdev_assert_locked(bp->dev);
 
 	clear_bit(BNXT_STATE_NAPI_DISABLED, &bp->state);
 	for (i = 0; i < bp->cp_nr_rings; i++) {
@@ -11405,7 +11411,7 @@ static void bnxt_enable_napi(struct bnxt *bp)
 			INIT_WORK(&cpr->dim.work, bnxt_dim_work);
 			cpr->dim.mode = DIM_CQ_PERIOD_MODE_START_FROM_EQE;
 		}
-		napi_enable(&bnapi->napi);
+		napi_enable_locked(&bnapi->napi);
 	}
 }
 
@@ -13290,11 +13296,17 @@ static netdev_features_t bnxt_fix_features(struct net_device *dev,
 static int bnxt_reinit_features(struct bnxt *bp, bool irq_re_init,
 				bool link_re_init, u32 flags, bool update_tpa)
 {
+	int rc;
+
+	netdev_lock(bp->dev);
 	bnxt_close_nic(bp, irq_re_init, link_re_init);
 	bp->flags = flags;
 	if (update_tpa)
 		bnxt_set_ring_params(bp);
-	return bnxt_open_nic(bp, irq_re_init, link_re_init);
+	rc = bnxt_open_nic(bp, irq_re_init, link_re_init);
+	netdev_unlock(bp->dev);
+
+	return rc;
 }
 
 static int bnxt_set_features(struct net_device *dev, netdev_features_t features)
@@ -13753,11 +13765,13 @@ static void bnxt_rtnl_lock_sp(struct bnxt *bp)
 	 */
 	clear_bit(BNXT_STATE_IN_SP_TASK, &bp->state);
 	rtnl_lock();
+	netdev_lock(bp->dev);
 }
 
 static void bnxt_rtnl_unlock_sp(struct bnxt *bp)
 {
 	set_bit(BNXT_STATE_IN_SP_TASK, &bp->state);
+	netdev_unlock(bp->dev);
 	rtnl_unlock();
 }
 
@@ -14621,8 +14635,10 @@ static void bnxt_fw_reset_task(struct work_struct *work)
 		}
 		bp->fw_reset_timestamp = jiffies;
 		rtnl_lock();
+		netdev_lock(bp->dev);
 		if (test_bit(BNXT_STATE_ABORT_ERR, &bp->state)) {
 			bnxt_fw_reset_abort(bp, rc);
+			netdev_unlock(bp->dev);
 			rtnl_unlock();
 			goto ulp_start;
 		}
@@ -14634,6 +14650,7 @@ static void bnxt_fw_reset_task(struct work_struct *work)
 			bp->fw_reset_state = BNXT_FW_RESET_STATE_ENABLE_DEV;
 			tmo = bp->fw_reset_min_dsecs * HZ / 10;
 		}
+		netdev_unlock(bp->dev);
 		rtnl_unlock();
 		bnxt_queue_fw_reset_work(bp, tmo);
 		return;
@@ -14712,7 +14729,9 @@ static void bnxt_fw_reset_task(struct work_struct *work)
 			bnxt_queue_fw_reset_work(bp, HZ / 10);
 			return;
 		}
+		netdev_lock(dev);
 		rc = bnxt_open(bp->dev);
+		netdev_unlock(dev);
 		if (rc) {
 			netdev_err(bp->dev, "bnxt_open() failed during FW reset\n");
 			bnxt_fw_reset_abort(bp, rc);
@@ -14868,8 +14887,10 @@ static int bnxt_change_mac_addr(struct net_device *dev, void *p)
 	eth_hw_addr_set(dev, addr->sa_data);
 	bnxt_clear_usr_fltrs(bp, true);
 	if (netif_running(dev)) {
+		netdev_lock(dev);
 		bnxt_close_nic(bp, false, false);
 		rc = bnxt_open_nic(bp, false, false);
+		netdev_unlock(dev);
 	}
 
 	return rc;
@@ -14879,6 +14900,9 @@ static int bnxt_change_mac_addr(struct net_device *dev, void *p)
 static int bnxt_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct bnxt *bp = netdev_priv(dev);
+	int rc = 0;
+
+	netdev_lock(dev);
 
 	if (netif_running(dev))
 		bnxt_close_nic(bp, true, false);
@@ -14895,9 +14919,11 @@ static int bnxt_change_mtu(struct net_device *dev, int new_mtu)
 	bnxt_set_ring_params(bp);
 
 	if (netif_running(dev))
-		return bnxt_open_nic(bp, true, false);
+		rc = bnxt_open_nic(bp, true, false);
 
-	return 0;
+	netdev_unlock(dev);
+
+	return rc;
 }
 
 int bnxt_setup_mq_tc(struct net_device *dev, u8 tc)
@@ -14918,10 +14944,14 @@ int bnxt_setup_mq_tc(struct net_device *dev, u8 tc)
 	if (bp->flags & BNXT_FLAG_SHARED_RINGS)
 		sh = true;
 
+	netdev_lock(dev);
+
 	rc = bnxt_check_rings(bp, bp->tx_nr_rings_per_tc, bp->rx_nr_rings,
 			      sh, tc, bp->tx_nr_rings_xdp);
-	if (rc)
+	if (rc) {
+		netdev_unlock(dev);
 		return rc;
+	}
 
 	/* Needs to close the device and do hw resource re-allocations */
 	if (netif_running(bp->dev))
@@ -14942,9 +14972,11 @@ int bnxt_setup_mq_tc(struct net_device *dev, u8 tc)
 			       tx_cp + bp->rx_nr_rings;
 
 	if (netif_running(bp->dev))
-		return bnxt_open_nic(bp, true, false);
+		rc = bnxt_open_nic(bp, true, false);
 
-	return 0;
+	netdev_unlock(dev);
+
+	return rc;
 }
 
 static int bnxt_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
@@ -16425,6 +16457,7 @@ static int bnxt_suspend(struct device *device)
 	bnxt_ulp_stop(bp);
 
 	rtnl_lock();
+	netdev_lock(dev);
 	if (netif_running(dev)) {
 		netif_device_detach(dev);
 		rc = bnxt_close(dev);
@@ -16433,6 +16466,7 @@ static int bnxt_suspend(struct device *device)
 	bnxt_ptp_clear(bp);
 	pci_disable_device(bp->pdev);
 	bnxt_free_ctx_mem(bp, false);
+	netdev_unlock(dev);
 	rtnl_unlock();
 	return rc;
 }
@@ -16480,7 +16514,9 @@ static int bnxt_resume(struct device *device)
 	}
 	bnxt_get_wol_settings(bp);
 	if (netif_running(dev)) {
+		netdev_lock(dev);
 		rc = bnxt_open(dev);
+		netdev_unlock(dev);
 		if (!rc)
 			netif_device_attach(dev);
 	}
@@ -16657,10 +16693,12 @@ static void bnxt_io_resume(struct pci_dev *pdev)
 
 	err = bnxt_hwrm_func_qcaps(bp);
 	if (!err) {
+		netdev_lock(dev);
 		if (netif_running(netdev))
 			err = bnxt_open(netdev);
 		else
 			err = bnxt_reserve_rings(bp, true);
+		netdev_unlock(dev);
 	}
 
 	if (!err)

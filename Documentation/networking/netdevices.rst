@@ -211,12 +211,12 @@ struct net_device synchronization rules
 =======================================
 ndo_open:
 	Synchronization: rtnl_lock() semaphore. In addition, netdev lock
-	if the driver implements shaper API.
+	if the driver implements queue management or shaper API.
 	Context: process
 
 ndo_stop:
 	Synchronization: rtnl_lock() semaphore. In addition, netdev lock
-	if the driver implements shaper API.
+	if the driver implements queue management or shaper API.
 	Context: process
 	Note: netif_running() is guaranteed false
 
@@ -299,6 +299,14 @@ napi->poll:
 	Context:
 		 softirq
 		 will be called with interrupts disabled by netconsole.
+
+struct netdev_queue_mgmt_ops synchronization rules
+==================================================
+ndo_queue_start:
+	Synchronization: Netdev lock.
+
+ndo_queue_start:
+	Synchronization: Netdev lock.
 
 NETDEV_INTERNAL symbol namespace
 ================================

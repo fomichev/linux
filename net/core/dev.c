@@ -168,7 +168,7 @@
 
 static void netdev_maybe_lock(struct net_device *dev)
 {
-	bool needs_locking = false;
+	bool needs_locking = !!(dev)->queue_mgmt_ops;
 
 #if IS_ENABLED(CONFIG_NET_SHAPER)
 	needs_locking |= !!(dev)->netdev_ops->net_shaper_ops;
@@ -180,7 +180,7 @@ static void netdev_maybe_lock(struct net_device *dev)
 
 static void netdev_maybe_unlock(struct net_device *dev)
 {
-	bool needs_locking = false;
+	bool needs_locking = !!(dev)->queue_mgmt_ops;
 
 #if IS_ENABLED(CONFIG_NET_SHAPER)
 	needs_locking |= !!(dev)->netdev_ops->net_shaper_ops;
