@@ -491,13 +491,10 @@ static int ethnl_default_doit(struct sk_buff *skb, struct genl_info *info)
 		goto err_dev;
 	ethnl_init_reply_data(reply_data, ops, req_info->dev);
 
-	rtnl_lock();
-	if (req_info->dev)
-		netdev_lock_ops(req_info->dev);
+
+	rtnl_netdev_lock_ops(req_info->dev);
 	ret = ops->prepare_data(req_info, reply_data, info);
-	if (req_info->dev)
-		netdev_unlock_ops(req_info->dev);
-	rtnl_unlock();
+	rtnl_netdev_unlock_ops(req_info->dev);
 	if (ret < 0)
 		goto err_cleanup;
 	ret = ops->reply_size(req_info, reply_data);
@@ -553,11 +550,9 @@ static int ethnl_default_dump_one(struct sk_buff *skb, struct net_device *dev,
 		return -EMSGSIZE;
 
 	ethnl_init_reply_data(ctx->reply_data, ctx->ops, dev);
-	rtnl_lock();
-	netdev_lock_ops(ctx->req_info->dev);
+	rtnl_netdev_lock_ops(ctx->req_info->dev);
 	ret = ctx->ops->prepare_data(ctx->req_info, ctx->reply_data, info);
-	netdev_unlock_ops(ctx->req_info->dev);
-	rtnl_unlock();
+	rtnl_netdev_unlock_ops(ctx->req_info->dev);
 	if (ret < 0)
 		goto out;
 	ret = ethnl_fill_reply_header(skb, dev, ctx->ops->hdr_attr);
@@ -700,8 +695,7 @@ static int ethnl_default_set_doit(struct sk_buff *skb, struct genl_info *info)
 
 	dev = req_info.dev;
 
-	rtnl_lock();
-	netdev_lock_ops(dev);
+	rtnl_netdev_lock_ops(dev);
 	dev->cfg_pending = kmemdup(dev->cfg, sizeof(*dev->cfg),
 				   GFP_KERNEL_ACCOUNT);
 	if (!dev->cfg_pending) {
@@ -729,8 +723,7 @@ out_free_cfg:
 	kfree(dev->cfg_pending);
 out_tie_cfg:
 	dev->cfg_pending = dev->cfg;
-	netdev_unlock_ops(dev);
-	rtnl_unlock();
+	rtnl_netdev_unlock_ops(dev);
 out_dev:
 	ethnl_parse_header_dev_put(&req_info);
 	return ret;

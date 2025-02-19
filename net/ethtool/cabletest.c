@@ -71,8 +71,7 @@ int ethnl_act_cable_test(struct sk_buff *skb, struct genl_info *info)
 
 	dev = req_info.dev;
 
-	rtnl_lock();
-	netdev_lock_ops(dev);
+	rtnl_netdev_lock_ops(dev);
 	phydev = ethnl_req_get_phydev(&req_info, tb,
 				      ETHTOOL_A_CABLE_TEST_HEADER,
 				      info->extack);
@@ -99,8 +98,7 @@ int ethnl_act_cable_test(struct sk_buff *skb, struct genl_info *info)
 		ethnl_cable_test_started(phydev, ETHTOOL_MSG_CABLE_TEST_NTF);
 
 out_unlock:
-	netdev_unlock_ops(dev);
-	rtnl_unlock();
+	rtnl_netdev_unlock_ops(dev);
 	ethnl_parse_header_dev_put(&req_info);
 	return ret;
 }
@@ -340,8 +338,7 @@ int ethnl_act_cable_test_tdr(struct sk_buff *skb, struct genl_info *info)
 	if (ret)
 		goto out_dev_put;
 
-	rtnl_lock();
-	netdev_lock_ops(dev);
+	rtnl_netdev_lock_ops(dev);
 	phydev = ethnl_req_get_phydev(&req_info, tb,
 				      ETHTOOL_A_CABLE_TEST_TDR_HEADER,
 				      info->extack);
@@ -369,8 +366,7 @@ int ethnl_act_cable_test_tdr(struct sk_buff *skb, struct genl_info *info)
 					 ETHTOOL_MSG_CABLE_TEST_TDR_NTF);
 
 out_unlock:
-	netdev_unlock_ops(dev);
-	rtnl_unlock();
+	rtnl_netdev_unlock_ops(dev);
 out_dev_put:
 	ethnl_parse_header_dev_put(&req_info);
 	return ret;

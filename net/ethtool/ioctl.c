@@ -2317,8 +2317,7 @@ static int ethtool_phys_id(struct net_device *dev, void __user *useraddr)
 	 */
 	busy = true;
 	netdev_hold(dev, &dev_tracker, GFP_KERNEL);
-	netdev_unlock_ops(dev);
-	rtnl_unlock();
+	rtnl_netdev_unlock_ops(dev);
 
 	if (rc == 0) {
 		/* Driver will handle this itself */
@@ -2331,20 +2330,17 @@ static int ethtool_phys_id(struct net_device *dev, void __user *useraddr)
 		u64 i = 0;
 
 		do {
-			rtnl_lock();
-			netdev_lock_ops(dev);
+			rtnl_netdev_lock_ops(dev);
 			rc = ops->set_phys_id(dev,
 				    (i++ & 1) ? ETHTOOL_ID_OFF : ETHTOOL_ID_ON);
-			netdev_unlock_ops(dev);
-			rtnl_unlock();
+			rtnl_netdev_unlock_ops(dev);
 			if (rc)
 				break;
 			schedule_timeout_interruptible(interval);
 		} while (!signal_pending(current) && (!id.data || i < count));
 	}
 
-	rtnl_lock();
-	netdev_lock_ops(dev);
+	rtnl_netdev_lock_ops(dev);
 	netdev_put(dev, &dev_tracker);
 	busy = false;
 
@@ -3082,17 +3078,12 @@ static int ethtool_set_fecparam(struct net_device *dev, void __user *useraddr)
 /* The main entry point in this file.  Called from net/core/dev_ioctl.c */
 
 static int
-__dev_ethtool(struct net *net, struct ifreq *ifr, void __user *useraddr,
+__dev_ethtool(struct net_device *dev, struct ifreq *ifr, void __user *useraddr,
 	      u32 ethcmd, struct ethtool_devlink_compat *devlink_state)
 {
-	struct net_device *dev;
 	u32 sub_cmd;
 	int rc;
 	netdev_features_t old_features;
-
-	dev = __dev_get_by_name(net, ifr->ifr_name);
-	if (!dev)
-		return -ENODEV;
 
 	if (ethcmd == ETHTOOL_PERQUEUE) {
 		if (copy_from_user(&sub_cmd, useraddr + sizeof(ethcmd), sizeof(sub_cmd)))
@@ -3140,11 +3131,10 @@ __dev_ethtool(struct net *net, struct ifreq *ifr, void __user *useraddr,
 	case ETHTOOL_GFECPARAM:
 		break;
 	default:
-		if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
+		if (!ns_capable(dev_net(dev)->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 	}
 
-	netdev_lock_ops(dev);
 	if (dev->dev.parent)
 		pm_runtime_get_sync(dev->dev.parent);
 
@@ -3378,7 +3368,6 @@ __dev_ethtool(struct net *net, struct ifreq *ifr, void __user *useraddr,
 out:
 	if (dev->dev.parent)
 		pm_runtime_put(dev->dev.parent);
-	netdev_unlock_ops(dev);
 
 	return rc;
 }
@@ -3386,6 +3375,7 @@ out:
 int dev_ethtool(struct net *net, struct ifreq *ifr, void __user *useraddr)
 {
 	struct ethtool_devlink_compat *state;
+	struct net_device *dev;
 	u32 ethcmd;
 	int rc;
 
@@ -3406,11 +3396,17 @@ int dev_ethtool(struct net *net, struct ifreq *ifr, void __user *useraddr)
 		break;
 	}
 
-	rtnl_lock();
-	rc = __dev_ethtool(net, ifr, useraddr, ethcmd, state);
-	rtnl_unlock();
-	if (rc)
+	dev = dev_get_by_name(net, ifr->ifr_name);
+	if (!dev) {
+		rc = -ENODEV;
 		goto exit_free;
+	}
+
+	rtnl_netdev_lock_ops(dev);
+	rc = __dev_ethtool(dev, ifr, useraddr, ethcmd, state);
+	rtnl_netdev_unlock_ops(dev);
+	if (rc)
+		goto exit_put;
 
 	switch (ethcmd) {
 	case ETHTOOL_FLASHDEV:
@@ -3425,11 +3421,13 @@ int dev_ethtool(struct net *net, struct ifreq *ifr, void __user *useraddr)
 						       sizeof(state->info.fw_version));
 		if (copy_to_user(useraddr, &state->info, sizeof(state->info))) {
 			rc = -EFAULT;
-			goto exit_free;
+			goto exit_put;
 		}
 		break;
 	}
 
+exit_put:
+	dev_put(dev);
 exit_free:
 	if (state->devlink)
 		devlink_put(state->devlink);

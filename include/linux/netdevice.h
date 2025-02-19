@@ -2492,6 +2492,12 @@ struct net_device {
 	bool			request_ops_lock;
 
 	/**
+	 * @request_no_rtnl_lock: request the core to avoid grabbing rtnl_lock
+	 * for @ethtool_ops.
+	 */
+	bool			request_no_rtnl_lock;
+
+	/**
 	 * @lock: netdev-scope lock, protects a small selection of fields.
 	 * Should always be taken using netdev_lock() / netdev_unlock() helpers.
 	 * Drivers are free to use it for other protection.
@@ -2814,6 +2820,45 @@ static inline void netdev_ops_assert_locked(struct net_device *dev)
 {
 	if (netdev_need_ops_lock(dev))
 		lockdep_assert_held(&dev->lock);
+}
+
+extern void rtnl_lock(void);
+extern void rtnl_unlock(void);
+
+/**
+ * rtnl_netdev_lock_ops() - grab netdev instance lock and/or rtnl_lock
+ * @dev: network device
+ *
+ * Depending on device features/preference:
+ * - rtnl_lock - grab rtnl_lock unless device requested opt-out via
+ *   request_no_rtnl_lock
+ * - instance lock - grab instance lock if device requested opt-in
+ *   via request_ops_lock or supports shaper or queue management APIs
+ */
+static inline void rtnl_netdev_lock_ops(struct net_device *dev)
+{
+	if (!dev) {
+		rtnl_lock();
+		return;
+	}
+
+	if (!dev->request_no_rtnl_lock)
+		rtnl_lock();
+
+	netdev_lock_ops(dev);
+}
+
+static inline void rtnl_netdev_unlock_ops(struct net_device *dev)
+{
+	if (!dev) {
+		rtnl_unlock();
+		return;
+	}
+
+	netdev_unlock_ops(dev);
+
+	if (!dev->request_no_rtnl_lock)
+		rtnl_unlock();
 }
 
 void netif_napi_set_irq_locked(struct napi_struct *napi, int irq);

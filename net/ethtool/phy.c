@@ -157,8 +157,7 @@ int ethnl_phy_doit(struct sk_buff *skb, struct genl_info *info)
 	if (ret < 0)
 		return ret;
 
-	rtnl_lock();
-	netdev_lock_ops(req_info.base.dev);
+	rtnl_netdev_lock_ops(req_info.base.dev);
 
 	ret = ethnl_phy_parse_request(&req_info.base, tb, info->extack);
 	if (ret < 0)
@@ -186,8 +185,7 @@ int ethnl_phy_doit(struct sk_buff *skb, struct genl_info *info)
 	if (ret)
 		goto err_free_msg;
 
-	netdev_unlock_ops(req_info.base.dev);
-	rtnl_unlock();
+	rtnl_netdev_unlock_ops(req_info.base.dev);
 	ethnl_parse_header_dev_put(&req_info.base);
 	genlmsg_end(rskb, reply_payload);
 
@@ -197,7 +195,6 @@ err_free_msg:
 	nlmsg_free(rskb);
 err_unlock:
 	netdev_unlock_ops(req_info.base.dev);
-	rtnl_unlock();
 	ethnl_parse_header_dev_put(&req_info.base);
 	return ret;
 }
@@ -290,14 +287,14 @@ int ethnl_phy_dumpit(struct sk_buff *skb, struct netlink_callback *cb)
 	struct net_device *dev;
 	int ret = 0;
 
-	rtnl_lock();
 
 	if (ctx->phy_req_info->base.dev) {
 		dev = ctx->phy_req_info->base.dev;
-		netdev_lock_ops(dev);
+		rtnl_netdev_lock_ops(dev);
 		ret = ethnl_phy_dump_one_dev(skb, dev, cb);
-		netdev_unlock_ops(dev);
+		rtnl_netdev_unlock_ops(dev);
 	} else {
+		rtnl_lock();
 		for_each_netdev_dump(net, dev, ctx->ifindex) {
 			netdev_lock_ops(dev);
 			ret = ethnl_phy_dump_one_dev(skb, dev, cb);
@@ -307,8 +304,8 @@ int ethnl_phy_dumpit(struct sk_buff *skb, struct netlink_callback *cb)
 
 			ctx->phy_index = 0;
 		}
+		rtnl_unlock();
 	}
-	rtnl_unlock();
 
 	return ret;
 }
