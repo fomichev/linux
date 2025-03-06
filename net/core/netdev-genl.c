@@ -122,15 +122,15 @@ int netdev_nl_dev_get_doit(struct sk_buff *skb, struct genl_info *info)
 	if (!rsp)
 		return -ENOMEM;
 
-	rtnl_lock();
-
-	netdev = __dev_get_by_index(genl_info_net(info), ifindex);
-	if (netdev)
+	netdev = dev_get_by_index(genl_info_net(info), ifindex);
+	if (netdev) {
+		rtnl_netdev_lock_ops(netdev);
 		err = netdev_nl_dev_fill(netdev, rsp, info);
-	else
+		rtnl_netdev_unlock_ops(netdev);
+		dev_put(netdev);
+	} else {
 		err = -ENODEV;
-
-	rtnl_unlock();
+	}
 
 	if (err)
 		goto err_free_msg;
@@ -151,7 +151,9 @@ int netdev_nl_dev_get_dumpit(struct sk_buff *skb, struct netlink_callback *cb)
 
 	rtnl_lock();
 	for_each_netdev_dump(net, netdev, ctx->ifindex) {
+		netdev_lock_ops(netdev);
 		err = netdev_nl_dev_fill(netdev, skb, genl_info_dump(cb));
+		netdev_unlock_ops(netdev);
 		if (err < 0)
 			break;
 	}
@@ -795,26 +797,34 @@ int netdev_nl_qstats_get_dumpit(struct sk_buff *skb,
 	if (info->attrs[NETDEV_A_QSTATS_IFINDEX])
 		ifindex = nla_get_u32(info->attrs[NETDEV_A_QSTATS_IFINDEX]);
 
-	rtnl_lock();
 	if (ifindex) {
-		netdev = __dev_get_by_index(net, ifindex);
-		if (netdev && netdev->stat_ops) {
-			err = netdev_nl_qstats_get_dump_one(netdev, scope, skb,
-							    info, ctx);
+		netdev = dev_get_by_index(net, ifindex);
+		if (netdev) {
+			rtnl_netdev_lock_ops(netdev);
+			if (netdev->stat_ops)
+				err = netdev_nl_qstats_get_dump_one(
+					netdev, scope, skb, info, ctx);
+			else
+				err = -EOPNOTSUPP;
+			rtnl_netdev_unlock_ops(netdev);
+			dev_put(netdev);
 		} else {
 			NL_SET_BAD_ATTR(info->extack,
 					info->attrs[NETDEV_A_QSTATS_IFINDEX]);
-			err = netdev ? -EOPNOTSUPP : -ENODEV;
+			err = -ENODEV;
 		}
 	} else {
+		rtnl_lock();
 		for_each_netdev_dump(net, netdev, ctx->ifindex) {
+			netdev_lock_ops(netdev);
 			err = netdev_nl_qstats_get_dump_one(netdev, scope, skb,
 							    info, ctx);
+			netdev_unlock_ops(netdev);
 			if (err < 0)
 				break;
 		}
+		rtnl_unlock();
 	}
-	rtnl_unlock();
 
 	return err;
 }
