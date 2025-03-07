@@ -885,6 +885,7 @@ static void nsim_setup(struct net_device *dev)
 			    NETIF_F_TSO;
 	dev->max_mtu = ETH_MAX_MTU;
 	dev->xdp_features = NETDEV_XDP_ACT_HW_OFFLOAD;
+	dev->request_no_rtnl_lock = true;
 }
 
 static int nsim_queue_init(struct netdevsim *ns)
