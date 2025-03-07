@@ -924,6 +924,8 @@ int netdev_nl_bind_rx_doit(struct sk_buff *skb, struct genl_info *info)
 
 	netdev_unlock(netdev);
 
+	mutex_lock(&priv->lock);
+
 	return 0;
 
 err_unbind:
