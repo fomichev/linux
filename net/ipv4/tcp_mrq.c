@@ -251,7 +251,7 @@ static bool tcp_mrq_post(struct sock *sk, struct sk_buff *skb)
 		dmabuf_cmsg = &r->ring->cmsg[(producer + nr++) % CMSG_SZ];
 		dmabuf_cmsg->frag_offset = frag_offset;
 		dmabuf_cmsg->frag_size = skb_frag_size(frag);
-		dmabuf_cmsg->dmabuf_id = net_iov_binding_id(niov);
+		dmabuf_cmsg->dmabuf_id = 0; //net_iov_binding_id(niov);
 
 		if (skip_xa) {
 			netmem_ref addr = net_iov_to_netmem(niov);

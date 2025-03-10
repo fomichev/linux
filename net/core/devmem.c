@@ -388,10 +388,10 @@ static void net_devmem_dmabuf_assign_tx_chunk(struct gen_pool *genpool,
 	int idx, i;
 
 	binding = owner->binding;
-	for (i = 0; i < owner->num_niovs; i++) {
-		niov = &owner->niovs[i];
+	for (i = 0; i < owner->area.num_niovs; i++) {
+		niov = &owner->area.niovs[i];
 		idx = net_iov_idx(niov);
-		binding->tx_vec[owner->base_virtual / PAGE_SIZE + idx] = niov;
+		binding->tx_vec[owner->area.base_virtual / PAGE_SIZE + idx] = niov;
 	}
 }
 
