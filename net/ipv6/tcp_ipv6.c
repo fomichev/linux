@@ -1722,8 +1722,8 @@ ipv6_pktoptions:
 	return 0;
 }
 
-static void tcp_v6_fill_cb(struct sk_buff *skb, const struct ipv6hdr *hdr,
-			   const struct tcphdr *th)
+void tcp_v6_fill_cb(struct sk_buff *skb, const struct ipv6hdr *hdr,
+		    const struct tcphdr *th)
 {
 	/* This is tricky: we move IP6CB at its correct location into
 	 * TCP_SKB_CB(). It must be done after xfrm6_policy_check(), because

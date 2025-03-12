@@ -29,6 +29,7 @@
 #include <net/pkt_cls.h>
 #include <net/rtnetlink.h>
 #include <net/udp_tunnel.h>
+#include <net/gro.h>
 
 #include "netdevsim.h"
 
@@ -357,8 +358,10 @@ static int nsim_rcv(struct nsim_rq *rq, int budget)
 			break;
 
 		skb = skb_dequeue(&rq->skb_queue);
-		netif_receive_skb(skb);
+		napi_gro_receive(&rq->napi, skb);
 	}
+
+	napi_gro_flush(&rq->napi, true);
 
 	return i;
 }

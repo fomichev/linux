@@ -1013,6 +1013,48 @@ err_genlmsg_free:
 	return err;
 }
 
+int netdev_nl_express_socket_add_doit(struct sk_buff *skb,
+				      struct genl_info *info)
+{
+	struct napi_struct *napi;
+	int napi_id, sock_fd;
+	struct socket *sock;
+	int err = 0;
+
+	if (GENL_REQ_ATTR_CHECK(info, NETDEV_A_EXPRESS_SOCKET_NAPI_ID) ||
+	    GENL_REQ_ATTR_CHECK(info, NETDEV_A_EXPRESS_SOCKET_SOCKET_FD))
+		return -EINVAL;
+
+	sock_fd = nla_get_u32(info->attrs[NETDEV_A_EXPRESS_SOCKET_SOCKET_FD]);
+	napi_id = nla_get_u32(info->attrs[NETDEV_A_EXPRESS_SOCKET_NAPI_ID]);
+
+	CLASS(fd, f)(sock_fd);
+
+	if (fd_empty(f)) {
+		NL_SET_BAD_ATTR(info->extack, info->attrs[NETDEV_A_EXPRESS_SOCKET_SOCKET_FD]);
+		return -EBADF;
+	}
+
+	sock = sock_from_file(fd_file(f));
+	if (!sock) {
+		NL_SET_BAD_ATTR(info->extack, info->attrs[NETDEV_A_EXPRESS_SOCKET_SOCKET_FD]);
+		return -ENOTSOCK;
+	}
+
+	napi = netdev_napi_by_id_lock(genl_info_net(info), napi_id);
+	if (!napi) {
+		NL_SET_BAD_ATTR(info->extack, info->attrs[NETDEV_A_EXPRESS_SOCKET_NAPI_ID]);
+		return -ENOENT;
+	}
+
+	err = sx_add(napi, sock);
+	netdev_unlock(napi->dev);
+	if (err)
+		return err;
+
+	return 0;
+}
+
 void netdev_nl_sock_priv_init(struct netdev_nl_sock *priv)
 {
 	INIT_LIST_HEAD(&priv->bindings);

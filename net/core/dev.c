@@ -7270,6 +7270,7 @@ void __netif_napi_del_locked(struct napi_struct *napi)
 	list_del_rcu(&napi->dev_list);
 	napi_free_frags(napi);
 
+	sx_cleanup(napi);
 	gro_cleanup(&napi->gro);
 
 	if (napi->thread) {

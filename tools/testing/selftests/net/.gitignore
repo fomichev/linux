@@ -41,6 +41,7 @@ sk_bind_sendto_listen
 sk_connect_zero_addr
 sk_so_peek_off
 socket
+socket_express
 so_incoming_cpu
 so_netns_cookie
 so_txtime

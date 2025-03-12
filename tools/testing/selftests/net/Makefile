@@ -109,6 +109,7 @@ TEST_PROGS += lwt_dst_cache_ref_loop.sh
 
 # YNL files, must be before "include ..lib.mk"
 YNL_GEN_FILES := busy_poller netlink-dumps mrqcat
+YNL_GEN_FILES += express_socket
 TEST_GEN_FILES += $(YNL_GEN_FILES)
 
 TEST_FILES := settings
@@ -124,6 +125,7 @@ include ../lib.mk
 YNL_GENS := netdev
 include ynl.mk
 
+$(OUTPUT)/express_socket: $(OUTPUT)/network_helpers.o
 $(OUTPUT)/epoll_busy_poll: LDLIBS += -lcap
 $(OUTPUT)/reuseport_bpf_numa: LDLIBS += -lnuma
 $(OUTPUT)/tcp_mmap: LDLIBS += -lpthread -lcrypto

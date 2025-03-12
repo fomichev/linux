@@ -10,6 +10,7 @@
 #include <linux/skbuff.h>
 #include <net/udp.h>
 #include <net/hotdata.h>
+#include <net/express_socket.h>
 
 /* This should be increased if a protocol with a bigger head is added. */
 #define GRO_MAX_HEAD (MAX_HEADER + 128)
@@ -521,6 +522,7 @@ static inline void gro_flush(struct gro_node *gro, bool flush_old)
 
 static inline void napi_gro_flush(struct napi_struct *napi, bool flush_old)
 {
+	sx_flush(napi, flush_old);
 	gro_flush(&napi->gro, flush_old);
 }
 

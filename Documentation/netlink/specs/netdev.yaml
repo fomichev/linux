@@ -551,6 +551,17 @@ attribute-sets:
         name: socket-fd
         doc: socket file descriptor to bind to for tx.
         type: u32
+  -
+    name: express-socket
+    attributes:
+      -
+        name: napi-id
+        doc: ID of the NAPI instance.
+        type: u32
+      -
+        name: socket-fd
+        doc: Socket fd to add to NAPI express socket path.
+        type: u32
 
 operations:
   list:
@@ -761,6 +772,16 @@ operations:
         reply:
           attributes:
             - id
+    -
+      name: express-socket-add
+      doc: Add socket to the express socket path of given NAPI instance.
+      attribute-set: express-socket
+      flags: [ admin-perm ]
+      do:
+        request:
+          attributes:
+            - napi-id
+            - socket-fd
 
 kernel-family:
   headers: [ "net/netdev_netlink.h"]

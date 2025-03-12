@@ -53,6 +53,7 @@
 #include <net/net_debug.h>
 #include <net/dropreason-core.h>
 #include <net/neighbour_tables.h>
+#include <net/express_socket.h>
 
 struct netpoll_info;
 struct device;
@@ -412,6 +413,7 @@ struct napi_struct {
 	int			napi_rmap_idx;
 	int			index;
 	struct napi_config	*config;
+	struct express_socket	*sx;
 };
 
 enum {
@@ -4136,6 +4138,9 @@ gro_result_t gro_receive_skb(struct gro_node *gro, struct sk_buff *skb);
 static inline gro_result_t napi_gro_receive(struct napi_struct *napi,
 					    struct sk_buff *skb)
 {
+	if (sx_rx(napi, skb))
+		return GRO_CONSUMED;
+
 	return gro_receive_skb(&napi->gro, skb);
 }
 
