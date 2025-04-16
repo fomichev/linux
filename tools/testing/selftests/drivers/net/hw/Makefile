@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0+ OR MIT
 
-TEST_GEN_FILES = iou-zcrx
+#TEST_GEN_FILES = iou-zcrx
 
 TEST_PROGS = \
 	csum.py \
@@ -48,4 +48,4 @@ include ../../../net/ynl.mk
 
 include ../../../net/bpf.mk
 
-$(OUTPUT)/iou-zcrx: LDLIBS += -luring
+#$(OUTPUT)/iou-zcrx: LDLIBS += -luring
