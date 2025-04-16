@@ -84,6 +84,7 @@
 
 #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 
+static bool trunc;
 static size_t buf_size = 64 * 1024 * 1024;
 static int hugepage_mb;
 static char *server_ip;
@@ -638,15 +639,19 @@ static int do_server(struct memory_buffer *mem)
 		struct cmsghdr *cm = NULL;
 		struct msghdr msg = { 0 };
 		struct dmabuf_token token;
+		int flags = 0;
 		ssize_t ret;
 
 		is_devmem = false;
+
+		if (trunc)
+			flags |= MSG_TRUNC;
 
 		msg.msg_iov = &iov;
 		msg.msg_iovlen = 1;
 		msg.msg_control = ctrl_data;
 		msg.msg_controllen = sizeof(ctrl_data);
-		ret = recvmsg(client_fd, &msg, MSG_SOCK_DEVMEM);
+		ret = recvmsg(client_fd, &msg, flags | MSG_SOCK_DEVMEM);
 		fprintf(stderr, "recvmsg ret=%ld\n", ret);
 		if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
 			continue;
@@ -721,7 +726,7 @@ static int do_server(struct memory_buffer *mem)
 				error(1, 0,
 				      "SO_DEVMEM_DONTNEED not enough tokens");
 		}
-		if (!is_devmem)
+		if (!is_devmem && !trunc)
 			error(1, 0, "flow steering error\n");
 
 		fprintf(stderr, "total_received=%lu\n", total_received);
@@ -1014,7 +1019,7 @@ int main(int argc, char *argv[])
 	int is_server = 0, opt;
 	int ret;
 
-	while ((opt = getopt(argc, argv, "Lls:c:p:v:q:t:f:H:S:")) != -1) {
+	while ((opt = getopt(argc, argv, "Lls:c:p:v:q:t:f:H:S:T")) != -1) {
 		switch (opt) {
 		case 'l':
 			is_server = 1;
@@ -1048,6 +1053,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'S':
 			buf_size = atoi(optarg);
+			break;
+		case 'T':
+			trunc = true;
 			break;
 		case '?':
 			fprintf(stderr, "unknown option: %c\n", optopt);

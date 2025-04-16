@@ -2458,7 +2458,7 @@ static int tcp_xa_pool_refill(struct sock *sk, struct tcp_xa_pool *p,
  */
 static int tcp_recvmsg_dmabuf(struct sock *sk, const struct sk_buff *skb,
 			      unsigned int offset, struct msghdr *msg,
-			      int remaining_len)
+			      int remaining_len, bool trunc)
 {
 	struct dmabuf_cmsg dmabuf_cmsg = { 0 };
 	struct tcp_xa_pool tcp_xa_pool;
@@ -2482,15 +2482,20 @@ static int tcp_recvmsg_dmabuf(struct sock *sk, const struct sk_buff *skb,
 		if (copy > 0) {
 			copy = min(copy, remaining_len);
 
-			n = copy_to_iter(skb->data + offset, copy,
-					 &msg->msg_iter);
-			if (n != copy) {
-				err = -EFAULT;
-				goto out;
+			if (!trunc) {
+				n = copy_to_iter(skb->data + offset, copy,
+						 &msg->msg_iter);
+				if (n != copy) {
+					err = -EFAULT;
+					goto out;
+				}
 			}
 
 			offset += copy;
 			remaining_len -= copy;
+
+			if (trunc)
+				goto skip_linear_copy;
 
 			/* First a dmabuf_cmsg for # bytes copied to user
 			 * buffer.
@@ -2504,6 +2509,7 @@ static int tcp_recvmsg_dmabuf(struct sock *sk, const struct sk_buff *skb,
 			if (err)
 				goto out;
 
+skip_linear_copy:
 			sent += copy;
 
 			if (remaining_len == 0)
@@ -2544,9 +2550,20 @@ static int tcp_recvmsg_dmabuf(struct sock *sk, const struct sk_buff *skb,
 			if (copy > 0) {
 				copy = min(copy, remaining_len);
 
+
 				frag_offset = net_iov_virtual_addr(niov) +
 					      skb_frag_off(frag) + offset -
 					      start;
+
+				offset += copy;
+				remaining_len -= copy;
+
+				if (trunc) {
+					/* pp will be refilled on kfree_skb */
+					goto skip_frag_copy;
+				}
+
+
 				dmabuf_cmsg.frag_offset = frag_offset;
 				dmabuf_cmsg.frag_size = copy;
 				err = tcp_xa_pool_refill(sk, &tcp_xa_pool,
@@ -2558,8 +2575,6 @@ static int tcp_recvmsg_dmabuf(struct sock *sk, const struct sk_buff *skb,
 				dmabuf_cmsg.frag_token = tcp_xa_pool.tokens[tcp_xa_pool.idx];
 				dmabuf_cmsg.dmabuf_id = net_devmem_iov_binding_id(niov);
 
-				offset += copy;
-				remaining_len -= copy;
 
 				err = put_cmsg_notrunc(msg, SOL_SOCKET,
 						       SO_DEVMEM_DMABUF,
@@ -2571,6 +2586,7 @@ static int tcp_recvmsg_dmabuf(struct sock *sk, const struct sk_buff *skb,
 				atomic_long_inc(&niov->pp_ref_count);
 				tcp_xa_pool.netmems[tcp_xa_pool.idx++] = skb_frag_netmem(frag);
 
+skip_frag_copy:
 				sent += copy;
 
 				if (remaining_len == 0)
@@ -2579,7 +2595,8 @@ static int tcp_recvmsg_dmabuf(struct sock *sk, const struct sk_buff *skb,
 			start = end;
 		}
 
-		tcp_xa_pool_commit(sk, &tcp_xa_pool);
+		if (!trunc)
+			tcp_xa_pool_commit(sk, &tcp_xa_pool);
 		if (!remaining_len)
 			goto out;
 
@@ -2597,7 +2614,8 @@ static int tcp_recvmsg_dmabuf(struct sock *sk, const struct sk_buff *skb,
 	}
 
 out:
-	tcp_xa_pool_commit(sk, &tcp_xa_pool);
+	if (!trunc)
+		tcp_xa_pool_commit(sk, &tcp_xa_pool);
 	if (!sent)
 		sent = err;
 
@@ -2796,11 +2814,7 @@ found_ok_skb:
 			}
 		}
 
-		if (!(flags & MSG_TRUNC)) {
-			if (last_copied_dmabuf != -1 &&
-			    last_copied_dmabuf != !skb_frags_readable(skb))
-				break;
-
+		if (!(flags & MSG_TRUNC) && !(flags & MSG_SOCK_DEVMEM)) {
 			if (skb_frags_readable(skb)) {
 				err = skb_copy_datagram_msg(skb, offset, msg,
 							    used);
@@ -2811,26 +2825,30 @@ found_ok_skb:
 					break;
 				}
 			} else {
-				if (!(flags & MSG_SOCK_DEVMEM)) {
-					/* dmabuf skbs can only be received
-					 * with the MSG_SOCK_DEVMEM flag.
-					 */
-					if (!copied)
-						copied = -EFAULT;
+				/* dmabuf skbs can only be received
+				 * with the MSG_SOCK_DEVMEM flag.
+				 */
+				if (!copied)
+					copied = -EFAULT;
 
-					break;
-				}
-
-				err = tcp_recvmsg_dmabuf(sk, skb, offset, msg,
-							 used);
-				if (err <= 0) {
-					if (!copied)
-						copied = -EFAULT;
-
-					break;
-				}
-				used = err;
+				break;
 			}
+		}
+
+		if (flags & MSG_SOCK_DEVMEM) {
+			if (last_copied_dmabuf != -1 &&
+			    last_copied_dmabuf != !skb_frags_readable(skb))
+				break;
+
+			err = tcp_recvmsg_dmabuf(sk, skb, offset, msg,
+						 used, flags & MSG_TRUNC);
+			if (err <= 0) {
+				if (!copied)
+					copied = -EFAULT;
+
+				break;
+			}
+			used = err;
 		}
 
 		last_copied_dmabuf = !skb_frags_readable(skb);
