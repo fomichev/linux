@@ -161,13 +161,16 @@ static struct sg_table *get_sg_table(struct device *dev, struct dma_buf *buf,
 	if (!sg)
 		return ERR_PTR(-ENOMEM);
 
-	ret = sg_alloc_table(sg, ubuf->pagecount, GFP_KERNEL);
+	ret = sg_alloc_table(sg, ubuf->nr_pinned, GFP_KERNEL);
 	if (ret < 0)
 		goto err_alloc;
 
-	for_each_sg(sg->sgl, sgl, ubuf->pagecount, i)
-		sg_set_folio(sgl, ubuf->folios[i], PAGE_SIZE,
-			     ubuf->offsets[i]);
+	for_each_sg(sg->sgl, sgl, ubuf->nr_pinned, i) {
+		struct folio *folio = ubuf->pinned_folios[i];
+
+		sg_set_folio(sgl, folio, folio_size(folio), 0);
+		/*pr_emerg("export sgt entry %d with size %zd\n", i, folio_size(folio));*/
+	}
 
 	ret = dma_map_sgtable(dev, sg, direction, 0);
 	if (ret < 0)

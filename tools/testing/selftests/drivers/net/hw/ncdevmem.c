@@ -77,12 +77,15 @@
 
 #define PAGE_SHIFT 12
 #define TEST_PREFIX "ncdevmem"
-#define NUM_PAGES 16000
 
 #ifndef MSG_SOCK_DEVMEM
 #define MSG_SOCK_DEVMEM 0x2000000
 #endif
 
+#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
+
+static size_t buf_size = 64 * 1024 * 1024;
+static int hugepage_mb;
 static char *server_ip;
 static char *client_ip;
 static char *port;
@@ -121,6 +124,8 @@ static struct memory_buffer *udmabuf_alloc(size_t size)
 {
 	struct udmabuf_create create;
 	struct memory_buffer *ctx;
+	unsigned int flags = 0;
+	size_t hugepage_bytes;
 	int ret;
 
 	ctx = malloc(sizeof(*ctx));
@@ -135,7 +140,19 @@ static struct memory_buffer *udmabuf_alloc(size_t size)
 		      "%s: [skip,no-udmabuf: Unable to access DMA buffer device file]\n",
 		      TEST_PREFIX);
 
-	ctx->memfd = memfd_create("udmabuf-test", MFD_ALLOW_SEALING);
+	switch (hugepage_mb) {
+	case 0:
+		break;
+	case 2:
+		flags = MFD_HUGE_2MB | MFD_HUGETLB;
+		break;
+	default:
+		error(1, EINVAL,
+		      "%s: [skip,udmabuf-hugepage: Unsupported hugepage size %umb]\n",
+		      TEST_PREFIX, hugepage_mb);
+	}
+
+	ctx->memfd = memfd_create("udmabuf-test", flags | MFD_ALLOW_SEALING);
 	if (ctx->memfd < 0)
 		error(1, errno, "%s: [skip,no-memfd]\n", TEST_PREFIX);
 
@@ -143,6 +160,10 @@ static struct memory_buffer *udmabuf_alloc(size_t size)
 	if (ret < 0)
 		error(1, errno, "%s: [skip,fcntl-add-seals]\n", TEST_PREFIX);
 
+	if (hugepage_mb) {
+		hugepage_bytes = hugepage_mb * 1024 * 1024;
+		size = DIV_ROUND_UP(size, hugepage_bytes) * hugepage_bytes;
+	}
 	ret = ftruncate(ctx->memfd, size);
 	if (ret == -1)
 		error(1, errno, "%s: [FAIL,memfd-truncate]\n", TEST_PREFIX);
@@ -727,7 +748,7 @@ void run_devmem_tests(void)
 	struct ynl_sock *ys;
 	size_t i = 0;
 
-	mem = provider->alloc(getpagesize() * NUM_PAGES);
+	mem = provider->alloc(buf_size);
 
 	/* Configure RSS to divert all traffic from our devmem queues */
 	if (configure_rss())
@@ -993,7 +1014,7 @@ int main(int argc, char *argv[])
 	int is_server = 0, opt;
 	int ret;
 
-	while ((opt = getopt(argc, argv, "Lls:c:p:v:q:t:f:")) != -1) {
+	while ((opt = getopt(argc, argv, "Lls:c:p:v:q:t:f:H:S:")) != -1) {
 		switch (opt) {
 		case 'l':
 			is_server = 1;
@@ -1021,6 +1042,12 @@ int main(int argc, char *argv[])
 			break;
 		case 'f':
 			ifname = optarg;
+			break;
+		case 'H':
+			hugepage_mb = atoi(optarg);
+			break;
+		case 'S':
+			buf_size = atoi(optarg);
 			break;
 		case '?':
 			fprintf(stderr, "unknown option: %c\n", optopt);
@@ -1084,7 +1111,7 @@ int main(int argc, char *argv[])
 	if (!port)
 		error(1, 0, "Missing -p argument\n");
 
-	mem = provider->alloc(getpagesize() * NUM_PAGES);
+	mem = provider->alloc(buf_size);
 	if (loopback) {
 		pthread_t thread;
 		int rc;
